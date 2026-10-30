@@ -1,0 +1,118 @@
+name: Build TrollService iOS (TrollStore IPA/TIPA)
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Cache Pub Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-cache-${{ runner.os }}-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            pub-cache-${{ runner.os }}-
+
+      - name: Install Host Signing Tools (ldid & libplist)
+        run: |
+          brew install ldid libplist openssl@3
+
+      - name: Compile daemon_root_helper (iOS arm64)
+        run: |
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p build/helpers_ios
+          xcrun -sdk iphoneos clang \
+            -arch arm64 \
+            -isysroot "$IOS_SDK" \
+            -miphoneos-version-min=14.0 \
+            -O2 -Wall -Wextra \
+            ios/Helpers/spawn_root.c \
+            ios/Helpers/daemon_root_helper.c \
+            -o build/helpers_ios/daemon_root_helper
+
+      - name: Compile fastPathSign (Host macOS & Target iOS arm64)
+        run: |
+          git clone --recurse-submodules --depth=1 https://github.com/opa334/TrollStore.git "$RUNNER_TEMP/TrollStore"
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          MAC_SDK=$(xcrun --sdk macosx --show-sdk-path)
+          OPENSSL_PREFIX=$(brew --prefix openssl@3)
+
+          # 1. Host fastPathSign for signing IPA during CI build
+          clang \
+            -isysroot "$MAC_SDK" \
+            -I"$RUNNER_TEMP/TrollStore/Exploits/fastPathSign/src" \
+            -I"$RUNNER_TEMP/TrollStore/Exploits/fastPathSign/ChOma/src" \
+            -I"$OPENSSL_PREFIX/include" \
+            -L"$OPENSSL_PREFIX/lib" \
+            "$RUNNER_TEMP/TrollStore/Exploits/fastPathSign/src/"*.c \
+            "$RUNNER_TEMP/TrollStore/Exploits/fastPathSign/src/"*.m \
+            "$RUNNER_TEMP/TrollStore/Exploits/fastPathSign/ChOma/src/"*.c \
+            -framework Foundation -framework Security -lcrypto \
+            -O2 -o "$RUNNER_TEMP/fastPathSign_host"
+
+          # 2. Target iOS arm64 fastPathSign & ldid to bundle in Runner.app/Helpers/
+          cp "$RUNNER_TEMP/fastPathSign_host" build/helpers_ios/fastPathSign
+          cp "$(which ldid)" build/helpers_ios/ldid
+
+      - name: Install Flutter Dependencies & Run Tests
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+
+      - name: Build Flutter iOS App (No Codesign)
+        run: |
+          flutter build ios --release --no-codesign
+
+      - name: Assemble Helpers, Apply ldid Entitlements & fastPathSign CoreTrust Bypass
+        run: |
+          APP_BUNDLE="build/ios/iphoneos/Runner.app"
+          mkdir -p "$APP_BUNDLE/Helpers"
+
+          cp build/helpers_ios/daemon_root_helper "$APP_BUNDLE/Helpers/"
+          cp build/helpers_ios/ldid "$APP_BUNDLE/Helpers/"
+          cp build/helpers_ios/fastPathSign "$APP_BUNDLE/Helpers/"
+          chmod 755 "$APP_BUNDLE/Helpers/"*
+
+          # 1. Sign Helper binaries with RootHelper.entitlements + CoreTrust bypass
+          for helper in daemon_root_helper ldid fastPathSign; do
+            ldid -Sios/Helpers/RootHelper.entitlements "$APP_BUNDLE/Helpers/$helper"
+            "$RUNNER_TEMP/fastPathSign_host" "$APP_BUNDLE/Helpers/$helper"
+          done
+
+          # 2. Sign Main App binary with Runner.entitlements + CoreTrust bypass
+          ldid -Sios/Runner/Runner.entitlements "$APP_BUNDLE/Runner"
+          "$RUNNER_TEMP/fastPathSign_host" "$APP_BUNDLE/Runner"
+
+          # 3. Mark TSPreAppliedExploitType = 2 (CVE-2023-41991) in Info.plist
+          plutil -replace TSPreAppliedExploitType -integer 2 "$APP_BUNDLE/Info.plist"
+
+          # 4. Package into .ipa and .tipa
+          mkdir -p dist/Payload
+          cp -R "$APP_BUNDLE" dist/Payload/
+          (cd dist && zip -qr TrollService.ipa Payload)
+          cp dist/TrollService.ipa dist/TrollService.tipa
+
+      - name: Upload TrollService IPA & TIPA Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrollService-TrollStore-Package
+          path: |
+            dist/TrollService.ipa
+            dist/TrollService.tipa
+          retention-days: 14
