@@ -28,14 +28,17 @@ jobs:
           restore-keys: |
             pub-cache-${{ runner.os }}-
 
-      - name: Install Host Signing Tools (ldid & libplist)
+      - name: Install Host ldid & OpenSSL Headers
         run: |
-          brew install ldid libplist openssl@3
+          brew install ldid openssl@3
 
-      - name: Compile daemon_root_helper (iOS arm64)
+      - name: Compile & Fetch iOS arm64 Helpers (daemon_root_helper, ldid, fastPathSign)
         run: |
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          OPENSSL_PREFIX=$(brew --prefix openssl@3)
           mkdir -p build/helpers_ios
+
+          # 1. 编译 daemon_root_helper (iOS arm64)
           xcrun -sdk iphoneos clang \
             -arch arm64 \
             -isysroot "$IOS_SDK" \
@@ -45,29 +48,27 @@ jobs:
             ios/Helpers/daemon_root_helper.c \
             -o build/helpers_ios/daemon_root_helper
 
-      - name: Compile fastPathSign (Host macOS & Target iOS arm64)
-        run: |
+          # 2. 下载 iOS arm64 版 ldid（供 TrollService 在手机上为被安装的目标程序签名赋权）
+          curl -fL "https://github.com/opa334/ldid/releases/latest/download/ldid" \
+            -o build/helpers_ios/ldid
+          chmod 755 build/helpers_ios/ldid
+
+          # 3. 交叉编译 iOS arm64 版 fastPathSign（供 TrollService 在手机上为被安装的目标程序注入 CoreTrust 绕过签名）
           git clone --recurse-submodules --depth=1 https://github.com/opa334/TrollStore.git "$RUNNER_TEMP/TrollStore"
-          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          MAC_SDK=$(xcrun --sdk macosx --show-sdk-path)
-          OPENSSL_PREFIX=$(brew --prefix openssl@3)
-
-          # 1. Host fastPathSign for signing IPA during CI build
-          clang \
-            -isysroot "$MAC_SDK" \
+          xcrun -sdk iphoneos clang \
+            -arch arm64 \
+            -isysroot "$IOS_SDK" \
+            -miphoneos-version-min=14.0 \
+            -Wno-pointer-to-int-cast -Wno-unused-command-line-argument -Wno-deprecated-declarations \
             -I"$RUNNER_TEMP/TrollStore/Exploits/fastPathSign/src" \
-            -I"$RUNNER_TEMP/TrollStore/Exploits/fastPathSign/ChOma/src" \
+            -I"$RUNNER_TEMP/TrollStore/ChOma/src" \
             -I"$OPENSSL_PREFIX/include" \
-            -L"$OPENSSL_PREFIX/lib" \
-            "$RUNNER_TEMP/TrollStore/Exploits/fastPathSign/src/"*.c \
-            "$RUNNER_TEMP/TrollStore/Exploits/fastPathSign/src/"*.m \
-            "$RUNNER_TEMP/TrollStore/Exploits/fastPathSign/ChOma/src/"*.c \
-            -framework Foundation -framework Security -lcrypto \
-            -O2 -o "$RUNNER_TEMP/fastPathSign_host"
-
-          # 2. Target iOS arm64 fastPathSign & ldid to bundle in Runner.app/Helpers/
-          cp "$RUNNER_TEMP/fastPathSign_host" build/helpers_ios/fastPathSign
-          cp "$(which ldid)" build/helpers_ios/ldid
+            ios/Helpers/fastPathSign_ios.c \
+            "$RUNNER_TEMP/TrollStore/Exploits/fastPathSign/src/coretrust_bug.c" \
+            "$RUNNER_TEMP/TrollStore/ChOma/src/"*.c \
+            "$RUNNER_TEMP/TrollStore/ChOma/external/ios/libcrypto.a" \
+            -framework CoreFoundation \
+            -O2 -o build/helpers_ios/fastPathSign
 
       - name: Install Flutter Dependencies & Run Tests
         run: |
@@ -79,30 +80,26 @@ jobs:
         run: |
           flutter build ios --release --no-codesign
 
-      - name: Assemble Helpers, Apply ldid Entitlements & fastPathSign CoreTrust Bypass
+      - name: Bundle On-Device Signing Tools & Embed Entitlements
         run: |
           APP_BUNDLE="build/ios/iphoneos/Runner.app"
           mkdir -p "$APP_BUNDLE/Helpers"
 
+          # 将 iOS arm64 架构的 daemon_root_helper、ldid、fastPathSign 放入 Runner.app/Helpers/
+          # 当用户在手机上用 TrollService 安装/更新服务程序（如 aistudio2api）时，
+          # TrollService 会调用 Helpers/ldid 与 Helpers/fastPathSign 对目标程序执行赋权与 CoreTrust 注入
           cp build/helpers_ios/daemon_root_helper "$APP_BUNDLE/Helpers/"
           cp build/helpers_ios/ldid "$APP_BUNDLE/Helpers/"
           cp build/helpers_ios/fastPathSign "$APP_BUNDLE/Helpers/"
           chmod 755 "$APP_BUNDLE/Helpers/"*
 
-          # 1. Sign Helper binaries with RootHelper.entitlements + CoreTrust bypass
+          # 对 TrollService 自身仅使用 ldid -S 声明权限块（用户用 TrollStore 安装 TrollService.ipa 时，由 TrollStore 自动完成对 TrollService 自身的签名）
           for helper in daemon_root_helper ldid fastPathSign; do
             ldid -Sios/Helpers/RootHelper.entitlements "$APP_BUNDLE/Helpers/$helper"
-            "$RUNNER_TEMP/fastPathSign_host" "$APP_BUNDLE/Helpers/$helper"
           done
-
-          # 2. Sign Main App binary with Runner.entitlements + CoreTrust bypass
           ldid -Sios/Runner/Runner.entitlements "$APP_BUNDLE/Runner"
-          "$RUNNER_TEMP/fastPathSign_host" "$APP_BUNDLE/Runner"
 
-          # 3. Mark TSPreAppliedExploitType = 2 (CVE-2023-41991) in Info.plist
-          plutil -replace TSPreAppliedExploitType -integer 2 "$APP_BUNDLE/Info.plist"
-
-          # 4. Package into .ipa and .tipa
+          # 打包为 .ipa 与 .tipa
           mkdir -p dist/Payload
           cp -R "$APP_BUNDLE" dist/Payload/
           (cd dist && zip -qr TrollService.ipa Payload)
