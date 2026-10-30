@@ -103,9 +103,8 @@ private let kPersonaFlagsOverride: UInt32 = 1
         }
         return
       }
-      let keepAlive = (args["keepAlive"] as? Bool) ?? true
       let extraArgs = (args["args"] as? [String]) ?? []
-      var cmdArgs = ["start", serviceId, binaryName, keepAlive ? "1" : "0"]
+      var cmdArgs = ["start", serviceId, binaryName]
       cmdArgs.append(contentsOf: extraArgs)
 
       DispatchQueue.global(qos: .userInitiated).async {

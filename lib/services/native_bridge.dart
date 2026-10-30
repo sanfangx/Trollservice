@@ -28,7 +28,6 @@ abstract class ServiceNativeBridge {
   Future<Map<String, dynamic>> startService({
     required String id,
     required String binaryName,
-    required bool keepAlive,
     required List<String> args,
   });
 
@@ -129,14 +128,12 @@ class MethodChannelServiceBridge implements ServiceNativeBridge {
   Future<Map<String, dynamic>> startService({
     required String id,
     required String binaryName,
-    required bool keepAlive,
     required List<String> args,
   }) async {
     try {
       final res = await _channel.invokeMethod<Object?>('startService', {
         'id': id,
         'binaryName': binaryName,
-        'keepAlive': keepAlive,
         'args': args,
       });
       return _normalizeMap(res);
@@ -327,7 +324,6 @@ class FileSystemMockServiceBridge implements ServiceNativeBridge {
   Future<Map<String, dynamic>> startService({
     required String id,
     required String binaryName,
-    required bool keepAlive,
     required List<String> args,
   }) async {
     final baseDir = '$serviceRootPath/$id';

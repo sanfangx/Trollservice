@@ -24,7 +24,6 @@ class _AddServiceScreenState extends State<AddServiceScreen> {
   late final TextEditingController _envCtrl;
   late final TextEditingController _srcPathCtrl;
 
-  bool _keepAlive = true;
   bool _installing = false;
 
   @override
@@ -105,7 +104,6 @@ class _AddServiceScreenState extends State<AddServiceScreen> {
       port: port,
       args: argsList,
       envVars: envMap,
-      keepAlive: _keepAlive,
     );
 
     final ok = await widget.controller.installService(
@@ -280,24 +278,13 @@ class _AddServiceScreenState extends State<AddServiceScreen> {
               _argsCtrl,
               '如 -open-ui=false',
             ),
-            const SizedBox(height: 12),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text('崩溃后自动重启保活 (KeepAlive)', style: TextStyle(fontSize: 14)),
-                CupertinoSwitch(
-                  value: _keepAlive,
-                  onChanged: (val) => setState(() => _keepAlive = val),
-                ),
-              ],
-            ),
             const SizedBox(height: 20),
             _buildSectionTitle('4. 环境变量 (.env 每行一个 KEY=VALUE)'),
             const SizedBox(height: 8),
             CupertinoTextField(
               controller: _envCtrl,
               maxLines: 6,
-              placeholder: 'LISTEN_ADDR=0.0.0.0:2048\nWAA_BACKEND=spidermonkey',
+              placeholder: 'LISTEN_ADDR=0.0.0.0:2048\nWAA_BACKEND=go',
               padding: const EdgeInsets.all(12),
               style: const TextStyle(fontFamily: 'Courier', fontSize: 13),
             ),

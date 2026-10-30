@@ -80,16 +80,17 @@ extern int proc_pid_rusage(int pid, int flavor, rusage_info_t* buffer);
 
 extern char** environ;
 
-static volatile sig_atomic_t g_stop_supervisor = 0;
-static volatile pid_t g_active_child_pid = 0;
+#ifndef POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE
+#define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 1
+#endif
 
-static void handle_supervisor_signal(int sig) {
-    (void)sig;
-    g_stop_supervisor = 1;
-    if (g_active_child_pid > 0) {
-        kill(g_active_child_pid, SIGTERM);
-    }
-}
+#ifndef POSIX_SPAWN_SETSID
+#define POSIX_SPAWN_SETSID 0x0400
+#endif
+
+extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict, uid_t, uint32_t);
+extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t* __restrict, uid_t);
+extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restrict, uid_t);
 
 static uint32_t swap_uint32(uint32_t val) {
     return ((val >> 24) & 0x000000FF) |
@@ -344,32 +345,61 @@ static void elevate_jetsam_limits(pid_t pid) {
     memorystatus_control(MEMORYSTATUS_CMD_SET_JETSAM_HIGH_WATER_MARK, (int32_t)pid, (uint32_t)-1, NULL, 0);
 }
 
+static void kill_processes_by_comm_prefix(const char* prefix, int sig) {
+    if (!prefix || prefix[0] == '\0') return;
+    int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL };
+    size_t buf_size = 0;
+    if (sysctl(mib, 3, NULL, &buf_size, NULL, 0) != 0 || buf_size == 0) return;
+
+    size_t alloc_size = buf_size + sizeof(struct kinfo_proc) * 16;
+    struct kinfo_proc* procs = (struct kinfo_proc*)malloc(alloc_size);
+    if (!procs) return;
+
+    if (sysctl(mib, 3, procs, &alloc_size, NULL, 0) == 0) {
+        size_t count = alloc_size / sizeof(struct kinfo_proc);
+        pid_t self_pid = getpid();
+        size_t cmp_len = strlen(prefix);
+        if (cmp_len > 15) cmp_len = 15; /* MAXCOMLEN is 16 including NUL */
+        for (size_t i = 0; i < count; i++) {
+            pid_t p = procs[i].kp_proc.p_pid;
+            if (p <= 1 || p == self_pid) continue;
+            if (strncmp(procs[i].kp_proc.p_comm, prefix, cmp_len) == 0) {
+                kill(p, sig);
+            }
+        }
+    }
+    free(procs);
+}
+
 static int stop_service_internal(const char* service_id) {
     char sup_pid_path[PATH_MAX];
     char svc_pid_path[PATH_MAX];
     snprintf(sup_pid_path, sizeof(sup_pid_path), "%s/%s/runtime/supervisor.pid", SERVICE_ROOT, service_id);
     snprintf(svc_pid_path, sizeof(svc_pid_path), "%s/%s/runtime/service.pid", SERVICE_ROOT, service_id);
 
+    /* 清理旧版可能遗留的 supervisor 进程 */
     pid_t sup_pid = read_pid_file(sup_pid_path);
     if (is_pid_alive(sup_pid)) {
-        kill(sup_pid, SIGTERM);
+        kill(sup_pid, SIGKILL);
     }
+    kill_processes_by_comm_prefix("daemon_root_hel", SIGKILL);
 
     pid_t svc_pid = read_pid_file(svc_pid_path);
     if (is_pid_alive(svc_pid)) {
         kill(svc_pid, SIGTERM);
-        for (int i = 0; i < 30; i++) {
+        for (int i = 0; i < 20; i++) {
             if (!is_pid_alive(svc_pid)) break;
-            usleep(100000); /* 100ms * 30 = 3s */
+            usleep(100000); /* 100ms * 20 = 2s */
         }
         if (is_pid_alive(svc_pid)) {
             kill(svc_pid, SIGKILL);
         }
     }
 
-    if (is_pid_alive(sup_pid)) {
-        kill(sup_pid, SIGKILL);
-    }
+    /* 兜底：若 .pid 文件已被删除但同名进程仍在内存中运行，按进程名清理 */
+    kill_processes_by_comm_prefix(service_id, SIGTERM);
+    usleep(100000);
+    kill_processes_by_comm_prefix(service_id, SIGKILL);
 
     unlink(sup_pid_path);
     unlink(svc_pid_path);
@@ -418,6 +448,9 @@ static void load_dotenv_into_environ(const char* env_file_path) {
 }
 
 static int cmd_init_workspace(void) {
+    /* 自动清理旧版可能遗留在后台的 supervise 循环进程 */
+    kill_processes_by_comm_prefix("daemon_root_hel", SIGKILL);
+
     if (mkdir_p(SERVICE_ROOT, 0755) != 0) {
         printf("{\"ok\":false,\"error\":\"创建 %s 失败\"}\n", SERVICE_ROOT);
         return 1;
@@ -531,24 +564,19 @@ static int cmd_update(const char* service_id, const char* new_src_path, const ch
     return 0;
 }
 
-static int cmd_supervise(int argc, char* argv[]) {
-    if (argc < 5) return 1;
+static int cmd_start(int argc, char* argv[]) {
+    if (argc < 4) {
+        printf("{\"ok\":false,\"error\":\"参数不足\"}\n");
+        return 1;
+    }
     const char* service_id = argv[2];
     const char* binary_name = argv[3];
-    int keep_alive = atoi(argv[4]);
-
-    setsid();
-    elevate_jetsam_limits(getpid());
-
-    signal(SIGTERM, handle_supervisor_signal);
-    signal(SIGINT, handle_supervisor_signal);
 
     char base_dir[PATH_MAX];
     char bin_path[PATH_MAX];
     char env_cfg_path[PATH_MAX];
     char env_work_path[PATH_MAX];
     char log_path[PATH_MAX];
-    char sup_pid_path[PATH_MAX];
     char svc_pid_path[PATH_MAX];
 
     snprintf(base_dir, sizeof(base_dir), "%s/%s", SERVICE_ROOT, service_id);
@@ -556,13 +584,16 @@ static int cmd_supervise(int argc, char* argv[]) {
     snprintf(env_cfg_path, sizeof(env_cfg_path), "%s/config/.env", base_dir);
     snprintf(env_work_path, sizeof(env_work_path), "%s/.env", base_dir);
     snprintf(log_path, sizeof(log_path), "%s/runtime/stdout.log", base_dir);
-    snprintf(sup_pid_path, sizeof(sup_pid_path), "%s/runtime/supervisor.pid", base_dir);
     snprintf(svc_pid_path, sizeof(svc_pid_path), "%s/runtime/service.pid", base_dir);
 
-    write_pid_file(sup_pid_path, getpid());
+    pid_t existing_pid = read_pid_file(svc_pid_path);
+    if (is_pid_alive(existing_pid)) {
+        printf("{\"ok\":true,\"already_running\":true,\"pid\":%d}\n", (int)existing_pid);
+        return 0;
+    }
 
     if (chdir(base_dir) != 0) {
-        unlink(sup_pid_path);
+        printf("{\"ok\":false,\"error\":\"无法进入服务目录 %s\"}\n", base_dir);
         return 1;
     }
 
@@ -570,111 +601,65 @@ static int cmd_supervise(int argc, char* argv[]) {
     struct stat st;
     if (stat(env_cfg_path, &st) == 0) {
         load_dotenv_into_environ(env_cfg_path);
-        /* 同步一份 .env 到工作根目录，兼容直接读取当前目录 .env 的程序（如 AIStudio2API） */
         copy_file_binary(env_cfg_path, env_work_path);
         chmod(env_work_path, 0644);
     } else if (stat(env_work_path, &st) == 0) {
         load_dotenv_into_environ(env_work_path);
     }
 
-    int extra_args = argc - 5;
+    int extra_args = argc - 4;
     char** child_argv = (char**)calloc((size_t)(extra_args + 2), sizeof(char*));
     child_argv[0] = (char*)bin_path;
     for (int i = 0; i < extra_args; i++) {
-        child_argv[i + 1] = argv[5 + i];
+        child_argv[i + 1] = argv[4 + i];
     }
     child_argv[extra_args + 1] = NULL;
 
-    while (!g_stop_supervisor) {
-        int log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        chown(log_path, MOBILE_UID, MOBILE_GID);
+    int log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    chown(log_path, MOBILE_UID, MOBILE_GID);
 
-        posix_spawn_file_actions_t actions;
-        posix_spawn_file_actions_init(&actions);
-        posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-        if (log_fd >= 0) {
-            posix_spawn_file_actions_adddup2(&actions, log_fd, STDOUT_FILENO);
-            posix_spawn_file_actions_adddup2(&actions, log_fd, STDERR_FILENO);
-            posix_spawn_file_actions_addclose(&actions, log_fd);
-        }
-
-        pid_t child_pid = 0;
-        int spawn_err = posix_spawn(&child_pid, bin_path, &actions, NULL, child_argv, environ);
-        posix_spawn_file_actions_destroy(&actions);
-        if (log_fd >= 0) close(log_fd);
-
-        if (spawn_err != 0) {
-            break;
-        }
-
-        g_active_child_pid = child_pid;
-        write_pid_file(svc_pid_path, child_pid);
-        elevate_jetsam_limits(child_pid);
-
-        int status = 0;
-        waitpid(child_pid, &status, 0);
-        g_active_child_pid = 0;
-        unlink(svc_pid_path);
-
-        if (g_stop_supervisor || !keep_alive) {
-            break;
-        }
-        sleep(2);
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (log_fd >= 0) {
+        posix_spawn_file_actions_adddup2(&actions, log_fd, STDOUT_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, log_fd, STDERR_FILENO);
+        posix_spawn_file_actions_addclose(&actions, log_fd);
     }
 
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+    posix_spawnattr_set_persona_uid_np(&attr, 0);
+    posix_spawnattr_set_persona_gid_np(&attr, 0);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID);
+
+    pid_t child_pid = 0;
+    int spawn_err = posix_spawn(&child_pid, bin_path, &actions, &attr, child_argv, environ);
+    posix_spawnattr_destroy(&attr);
+    posix_spawn_file_actions_destroy(&actions);
+    if (log_fd >= 0) close(log_fd);
     free(child_argv);
-    unlink(sup_pid_path);
-    return 0;
-}
 
-static int cmd_start(int argc, char* argv[]) {
-    if (argc < 5) {
-        printf("{\"ok\":false,\"error\":\"参数不足\"}\n");
-        return 1;
-    }
-    const char* service_id = argv[2];
-
-    char svc_pid_path[PATH_MAX];
-    snprintf(svc_pid_path, sizeof(svc_pid_path), "%s/%s/runtime/service.pid", SERVICE_ROOT, service_id);
-    pid_t existing_pid = read_pid_file(svc_pid_path);
-    if (is_pid_alive(existing_pid)) {
-        printf("{\"ok\":true,\"already_running\":true,\"pid\":%d}\n", (int)existing_pid);
-        return 0;
-    }
-
-    char exe_path[PATH_MAX];
-    uint32_t buf_size = sizeof(exe_path);
-    if (_NSGetExecutablePath(exe_path, &buf_size) != 0) {
-        printf("{\"ok\":false,\"error\":\"无法获取 helper 路径\"}\n");
+    if (spawn_err != 0) {
+        printf("{\"ok\":false,\"error\":\"启动进程失败 (errno=%d)\"}\n", spawn_err);
         return 1;
     }
 
-    char** sup_argv = (char**)calloc((size_t)(argc + 1), sizeof(char*));
-    sup_argv[0] = exe_path;
-    sup_argv[1] = "supervise";
-    for (int i = 2; i < argc; i++) {
-        sup_argv[i] = argv[i];
-    }
-    sup_argv[argc] = NULL;
+    elevate_jetsam_limits(child_pid);
+    write_pid_file(svc_pid_path, child_pid);
 
-    pid_t sup_pid = 0;
-    int err = spawn_root_detached(exe_path, sup_argv, environ, &sup_pid);
-    free(sup_argv);
-
-    if (err != 0) {
-        printf("{\"ok\":false,\"error\":\"启动后台监管进程失败 (err=%d)\"}\n", err);
+    /* 等待 250ms 检测是否因配置错误立即退出，若是则立即清理 pid 文件并返回失败提示 */
+    usleep(250000);
+    int status = 0;
+    pid_t w = waitpid(child_pid, &status, WNOHANG);
+    if (w == child_pid || !is_pid_alive(child_pid)) {
+        unlink(svc_pid_path);
+        printf("{\"ok\":false,\"error\":\"程序启动后立即退出，请打开实时日志查看报错原因\"}\n");
         return 1;
     }
 
-    /* 等待最多 800ms 让子进程写入 service.pid */
-    pid_t svc_pid = 0;
-    for (int i = 0; i < 8; i++) {
-        usleep(100000);
-        svc_pid = read_pid_file(svc_pid_path);
-        if (is_pid_alive(svc_pid)) break;
-    }
-
-    printf("{\"ok\":true,\"supervisor_pid\":%d,\"pid\":%d}\n", (int)sup_pid, (int)svc_pid);
+    printf("{\"ok\":true,\"pid\":%d}\n", (int)child_pid);
     return 0;
 }
 
@@ -761,8 +746,6 @@ int main(int argc, char* argv[]) {
         return cmd_install(argv[2], argv[3], argv[4]);
     } else if (strcmp(cmd, "update") == 0 && argc >= 5) {
         return cmd_update(argv[2], argv[3], argv[4]);
-    } else if (strcmp(cmd, "supervise") == 0) {
-        return cmd_supervise(argc, argv);
     } else if (strcmp(cmd, "start") == 0) {
         return cmd_start(argc, argv);
     } else if (strcmp(cmd, "stop") == 0 && argc >= 3) {

@@ -86,14 +86,15 @@ class ServicePreset {
     ServicePreset(
       key: 'aistudio2api',
       title: 'AIStudio2API',
-      subtitle: 'Google AI Studio 转 OpenAI / Claude / Gemini API（内置 SpiderMonkey WAA）',
+      subtitle: 'Google AI Studio 转 OpenAI / Claude / Gemini API（内置无浏览器 WAA）',
       defaultId: 'aistudio2api',
       defaultBinaryName: 'aistudio2api',
       defaultPort: 2048,
       defaultArgs: ['-open-ui=false'],
       defaultEnv: {
         'LISTEN_ADDR': '0.0.0.0:2048',
-        'WAA_BACKEND': 'spidermonkey',
+        'WAA_BACKEND': 'go',
+        'AISTUDIO_AUTH_STATES': 'accounts',
         'AUTH_STATES': 'accounts',
         'LOG_FILE': 'true',
       },
@@ -149,7 +150,6 @@ class ServiceItem {
   final int port;
   final List<String> args;
   final Map<String, String> envVars;
-  final bool keepAlive;
   final DateTime installedAt;
   final DateTime updatedAt;
   final ServiceRuntimeStatus status;
@@ -161,7 +161,6 @@ class ServiceItem {
     required this.port,
     this.args = const [],
     this.envVars = const {},
-    this.keepAlive = true,
     DateTime? installedAt,
     DateTime? updatedAt,
     this.status = const ServiceRuntimeStatus(),
@@ -202,7 +201,6 @@ class ServiceItem {
     int? port,
     List<String>? args,
     Map<String, String>? envVars,
-    bool? keepAlive,
     DateTime? installedAt,
     DateTime? updatedAt,
     ServiceRuntimeStatus? status,
@@ -214,7 +212,6 @@ class ServiceItem {
       port: port ?? this.port,
       args: args ?? this.args,
       envVars: envVars ?? this.envVars,
-      keepAlive: keepAlive ?? this.keepAlive,
       installedAt: installedAt ?? this.installedAt,
       updatedAt: updatedAt ?? this.updatedAt,
       status: status ?? this.status,
@@ -229,7 +226,6 @@ class ServiceItem {
       'port': port,
       'args': args,
       'envVars': envVars,
-      'keepAlive': keepAlive,
       'installedAt': installedAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
     };
@@ -245,7 +241,6 @@ class ServiceItem {
       port: (json['port'] as num?)?.toInt() ?? 0,
       args: rawArgs.map((e) => e.toString()).toList(),
       envVars: rawEnv.map((k, v) => MapEntry(k, v.toString())),
-      keepAlive: (json['keepAlive'] as bool?) ?? true,
       installedAt: DateTime.tryParse((json['installedAt'] as String?) ?? '') ??
           DateTime.now(),
       updatedAt: DateTime.tryParse((json['updatedAt'] as String?) ?? '') ??

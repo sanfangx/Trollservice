@@ -25,7 +25,6 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
   late final TextEditingController _envCtrl;
   late final TextEditingController _updateSrcPathCtrl;
 
-  late bool _keepAlive;
   bool _updatingBinary = false;
   bool _savingConfig = false;
 
@@ -40,7 +39,6 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
       text: s.envVars.entries.map((e) => '${e.key}=${e.value}').join('\n'),
     );
     _updateSrcPathCtrl = TextEditingController();
-    _keepAlive = s.keepAlive;
   }
 
   @override
@@ -108,7 +106,6 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
       port: port,
       args: args,
       envVars: envMap,
-      keepAlive: _keepAlive,
     );
 
     await widget.controller.updateServiceConfig(updated);
@@ -302,17 +299,6 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
             ),
             const SizedBox(height: 10),
             _buildField('启动命令行参数', _argsCtrl),
-            const SizedBox(height: 12),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text('崩溃后自动重启保活 (KeepAlive)', style: TextStyle(fontSize: 14)),
-                CupertinoSwitch(
-                  value: _keepAlive,
-                  onChanged: (val) => setState(() => _keepAlive = val),
-                ),
-              ],
-            ),
             const SizedBox(height: 14),
             Text(
               '环境变量 (.env)',

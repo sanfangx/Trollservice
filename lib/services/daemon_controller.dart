@@ -213,7 +213,6 @@ class DaemonController extends ChangeNotifier {
         await bridge.startService(
           id: updatedItem.id,
           binaryName: updatedItem.binaryName,
-          keepAlive: updatedItem.keepAlive,
           args: updatedItem.args,
         );
       }
@@ -226,7 +225,7 @@ class DaemonController extends ChangeNotifier {
     }
   }
 
-  /// 修改服务配置（端口、启动参数、环境变量、保活开关），保留所有数据
+  /// 修改服务配置（端口、启动参数、环境变量），保留所有数据
   Future<bool> updateServiceConfig(ServiceItem updated) async {
     final index = _services.indexWhere((s) => s.id == updated.id);
     if (index < 0) return false;
@@ -260,7 +259,6 @@ class DaemonController extends ChangeNotifier {
       final res = await bridge.startService(
         id: item.id,
         binaryName: item.binaryName,
-        keepAlive: item.keepAlive,
         args: item.args,
       );
       final ok = (res['ok'] as bool?) ?? false;
