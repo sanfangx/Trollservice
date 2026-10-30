@@ -93,8 +93,8 @@ jobs:
           cp build/helpers_ios/fastPathSign "$APP_BUNDLE/Helpers/"
           chmod 755 "$APP_BUNDLE/Helpers/"*
 
-          # 对 TrollService 自身仅使用 ldid -S 声明权限块（用户用 TrollStore 安装 TrollService.ipa 时，由 TrollStore 自动完成对 TrollService 自身的签名）
-          for helper in daemon_root_helper ldid fastPathSign; do
+          # 对 TrollService 自身新编译的组件使用 ldid -S 声明权限块（Helpers/ldid 来自 opa334 官方已含完整权限签名；用户用 TrollStore 安装 TrollService.ipa 时，由 TrollStore 自动完成对 TrollService 的签名）
+          for helper in daemon_root_helper fastPathSign; do
             ldid -Sios/Helpers/RootHelper.entitlements "$APP_BUNDLE/Helpers/$helper"
           done
           ldid -Sios/Runner/Runner.entitlements "$APP_BUNDLE/Runner"

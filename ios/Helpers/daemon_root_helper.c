@@ -75,8 +75,8 @@ struct rusage_info_v4 {
     uint64_t ri_interval_max_phys_footprint;
     uint64_t ri_runnable_time;
 };
-extern int proc_pid_rusage(int pid, int flavor, rusage_info_t* buffer);
 #endif
+extern int proc_pid_rusage(int pid, int flavor, rusage_info_t* buffer);
 
 extern char** environ;
 
