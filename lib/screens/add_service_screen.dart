@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 
@@ -22,8 +24,10 @@ class _AddServiceScreenState extends State<AddServiceScreen> {
   late final TextEditingController _portCtrl;
   late final TextEditingController _argsCtrl;
   late final TextEditingController _envCtrl;
+  late final TextEditingController _entsCtrl;
   late final TextEditingController _srcPathCtrl;
 
+  bool _showCustomEnts = false;
   bool _installing = false;
 
   @override
@@ -35,6 +39,7 @@ class _AddServiceScreenState extends State<AddServiceScreen> {
     _portCtrl = TextEditingController();
     _argsCtrl = TextEditingController();
     _envCtrl = TextEditingController();
+    _entsCtrl = TextEditingController();
     _srcPathCtrl = TextEditingController();
     _applyPreset(_selectedPreset);
   }
@@ -47,6 +52,7 @@ class _AddServiceScreenState extends State<AddServiceScreen> {
     _portCtrl.dispose();
     _argsCtrl.dispose();
     _envCtrl.dispose();
+    _entsCtrl.dispose();
     _srcPathCtrl.dispose();
     super.dispose();
   }
@@ -62,7 +68,32 @@ class _AddServiceScreenState extends State<AddServiceScreen> {
       _envCtrl.text = preset.defaultEnv.entries
           .map((e) => '${e.key}=${e.value}')
           .join('\n');
+      _entsCtrl.text = ServiceItem.generateServiceEntitlementsXml(preset.defaultId);
     });
+  }
+
+  void _resetDefaultEntitlements() {
+    final id = _idCtrl.text.trim().isEmpty ? _selectedPreset.defaultId : _idCtrl.text.trim();
+    setState(() {
+      _entsCtrl.text = ServiceItem.generateServiceEntitlementsXml(id);
+    });
+    HapticFeedback.selectionClick();
+  }
+
+  Future<void> _pickEntitlementsFile() async {
+    HapticFeedback.selectionClick();
+    final path = await widget.controller.bridge.pickBinaryFile();
+    if (path != null && path.isNotEmpty && mounted) {
+      try {
+        final content = File(path).readAsStringSync();
+        setState(() {
+          _entsCtrl.text = content;
+          _showCustomEnts = true;
+        });
+      } catch (e) {
+        _showAlert('读取 entitlements 文件失败: $e');
+      }
+    }
   }
 
   Future<void> _pickFile() async {
@@ -106,9 +137,12 @@ class _AddServiceScreenState extends State<AddServiceScreen> {
       envVars: envMap,
     );
 
+    final customEnts = _entsCtrl.text.trim();
+
     final ok = await widget.controller.installService(
       item: item,
       srcBinaryPath: srcPath,
+      customEntitlementsXml: customEnts.isNotEmpty ? customEnts : null,
     );
 
     if (!mounted) return;
@@ -279,15 +313,100 @@ class _AddServiceScreenState extends State<AddServiceScreen> {
               '如 -open-ui=false',
             ),
             const SizedBox(height: 20),
-            _buildSectionTitle('4. 环境变量 (.env 每行一个 KEY=VALUE)'),
+            _buildSectionTitle('4. 环境变量 (.env 默认留空，按需填写)'),
             const SizedBox(height: 8),
             CupertinoTextField(
               controller: _envCtrl,
-              maxLines: 6,
-              placeholder: 'LISTEN_ADDR=0.0.0.0:2048\nWAA_BACKEND=go',
+              maxLines: 5,
+              placeholder: '# 默认留空，按需配置环境变量\n# 例如: LISTEN_ADDR=0.0.0.0:2048\n# WAA_BACKEND=go',
               padding: const EdgeInsets.all(12),
               style: const TextStyle(fontFamily: 'Courier', fontSize: 13),
             ),
+            const SizedBox(height: 20),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                _buildSectionTitle('5. 自定义签名权限 (Entitlements)'),
+                CupertinoButton(
+                  padding: EdgeInsets.zero,
+                  onPressed: () {
+                    setState(() => _showCustomEnts = !_showCustomEnts);
+                  },
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        _showCustomEnts ? '收起配置' : '展开自定义',
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                      Icon(
+                        _showCustomEnts
+                            ? CupertinoIcons.chevron_up
+                            : CupertinoIcons.chevron_down,
+                        size: 14,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '默认自动注入免沙盒 (no-sandbox)、root 权限、全网络访问及防 Jetsam 强杀权限。您可展开在此自定义、导入 .plist 或重置默认。',
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.4,
+                color: CupertinoColors.secondaryLabel.resolveFrom(context),
+              ),
+            ),
+            if (_showCustomEnts) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  CupertinoButton(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    color: CupertinoColors.tertiarySystemFill
+                        .resolveFrom(context),
+                    onPressed: _pickEntitlementsFile,
+                    child: Text(
+                      '导入 .plist 文件',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: CupertinoColors.label.resolveFrom(context),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  CupertinoButton(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    color: CupertinoColors.tertiarySystemFill
+                        .resolveFrom(context),
+                    onPressed: _resetDefaultEntitlements,
+                    child: Text(
+                      '重置为默认权限',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: CupertinoColors.label.resolveFrom(context),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              CupertinoTextField(
+                controller: _entsCtrl,
+                maxLines: 12,
+                placeholder: 'XML 格式的 Entitlements',
+                padding: const EdgeInsets.all(12),
+                style: const TextStyle(fontFamily: 'Courier', fontSize: 12),
+              ),
+            ],
             const SizedBox(height: 28),
             SizedBox(
               width: double.infinity,

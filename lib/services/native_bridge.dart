@@ -15,6 +15,7 @@ abstract class ServiceNativeBridge {
     required String id,
     required String srcPath,
     required String binaryName,
+    String? customEntitlementsXml,
   });
 
   /// 更新程序：停止运行中进程、仅替换 `bin/<binaryName>` 并重新执行 ldid -S + fastPathSign，100% 保留程序数据
@@ -22,6 +23,7 @@ abstract class ServiceNativeBridge {
     required String id,
     required String srcPath,
     required String binaryName,
+    String? customEntitlementsXml,
   });
 
   /// 启动服务（以 persona-mgmt UID 0 + POSIX_SPAWN_SETSID 后台常驻运行）
@@ -93,16 +95,31 @@ class MethodChannelServiceBridge implements ServiceNativeBridge {
     required String id,
     required String srcPath,
     required String binaryName,
+    String? customEntitlementsXml,
   }) async {
+    File? tempEntsFile;
     try {
-      final res = await _channel.invokeMethod<Object?>('installService', {
+      final args = <String, dynamic>{
         'id': id,
         'srcPath': srcPath,
         'binaryName': binaryName,
-      });
+      };
+      if (customEntitlementsXml != null &&
+          customEntitlementsXml.trim().isNotEmpty) {
+        tempEntsFile = File(
+          '${Directory.systemTemp.path}/ts_ents_${id}_${DateTime.now().millisecondsSinceEpoch}.plist',
+        );
+        tempEntsFile.writeAsStringSync(customEntitlementsXml.trim());
+        args['customEntsPath'] = tempEntsFile.path;
+      }
+      final res = await _channel.invokeMethod<Object?>('installService', args);
       return _normalizeMap(res);
     } on PlatformException catch (e) {
       return {'ok': false, 'error': e.message ?? e.code};
+    } finally {
+      try {
+        tempEntsFile?.deleteSync();
+      } catch (_) {}
     }
   }
 
@@ -111,16 +128,31 @@ class MethodChannelServiceBridge implements ServiceNativeBridge {
     required String id,
     required String srcPath,
     required String binaryName,
+    String? customEntitlementsXml,
   }) async {
+    File? tempEntsFile;
     try {
-      final res = await _channel.invokeMethod<Object?>('updateService', {
+      final args = <String, dynamic>{
         'id': id,
         'srcPath': srcPath,
         'binaryName': binaryName,
-      });
+      };
+      if (customEntitlementsXml != null &&
+          customEntitlementsXml.trim().isNotEmpty) {
+        tempEntsFile = File(
+          '${Directory.systemTemp.path}/ts_ents_${id}_${DateTime.now().millisecondsSinceEpoch}.plist',
+        );
+        tempEntsFile.writeAsStringSync(customEntitlementsXml.trim());
+        args['customEntsPath'] = tempEntsFile.path;
+      }
+      final res = await _channel.invokeMethod<Object?>('updateService', args);
       return _normalizeMap(res);
     } on PlatformException catch (e) {
       return {'ok': false, 'error': e.message ?? e.code};
+    } finally {
+      try {
+        tempEntsFile?.deleteSync();
+      } catch (_) {}
     }
   }
 
@@ -249,6 +281,7 @@ class FileSystemMockServiceBridge implements ServiceNativeBridge {
     required String id,
     required String srcPath,
     required String binaryName,
+    String? customEntitlementsXml,
   }) async {
     final srcFile = File(srcPath);
     if (!srcFile.existsSync()) {
@@ -267,7 +300,11 @@ class FileSystemMockServiceBridge implements ServiceNativeBridge {
     srcFile.copySync(dstBin.path);
 
     final entsFile = File('${cfgDir.path}/entitlements.plist');
-    entsFile.writeAsStringSync(ServiceItem.generateServiceEntitlementsXml(id));
+    final xmlContent = (customEntitlementsXml != null &&
+            customEntitlementsXml.trim().isNotEmpty)
+        ? customEntitlementsXml.trim()
+        : ServiceItem.generateServiceEntitlementsXml(id);
+    entsFile.writeAsStringSync(xmlContent);
 
     executedSignCommands.add('ldid -S${entsFile.path} ${dstBin.path}');
     executedSignCommands.add('fastPathSign ${dstBin.path}');
@@ -280,6 +317,7 @@ class FileSystemMockServiceBridge implements ServiceNativeBridge {
     required String id,
     required String srcPath,
     required String binaryName,
+    String? customEntitlementsXml,
   }) async {
     final srcFile = File(srcPath);
     if (!srcFile.existsSync()) {
@@ -304,7 +342,10 @@ class FileSystemMockServiceBridge implements ServiceNativeBridge {
     srcFile.copySync(dstBin.path);
 
     final entsFile = File('${cfgDir.path}/entitlements.plist');
-    if (!entsFile.existsSync()) {
+    if (customEntitlementsXml != null &&
+        customEntitlementsXml.trim().isNotEmpty) {
+      entsFile.writeAsStringSync(customEntitlementsXml.trim());
+    } else if (!entsFile.existsSync()) {
       entsFile.writeAsStringSync(ServiceItem.generateServiceEntitlementsXml(id));
     }
 
@@ -329,7 +370,7 @@ class FileSystemMockServiceBridge implements ServiceNativeBridge {
     final baseDir = '$serviceRootPath/$id';
     final envCfg = File('$baseDir/config/.env');
     final envWork = File('$baseDir/.env');
-    if (envCfg.existsSync()) {
+    if (!envWork.existsSync() && envCfg.existsSync()) {
       envCfg.copySync(envWork.path);
     }
 

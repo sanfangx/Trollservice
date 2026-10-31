@@ -70,8 +70,13 @@ private let kPersonaFlagsOverride: UInt32 = 1
         }
         return
       }
+      let customEntsPath = (args["customEntsPath"] as? String) ?? ""
+      var helperArgs = ["install", serviceId, srcPath, binaryName]
+      if !customEntsPath.isEmpty {
+        helperArgs.append(customEntsPath)
+      }
       DispatchQueue.global(qos: .userInitiated).async {
-        let output = self.invokeRootHelper(args: ["install", serviceId, srcPath, binaryName])
+        let output = self.invokeRootHelper(args: helperArgs)
         DispatchQueue.main.async {
           result(output)
         }
@@ -87,8 +92,13 @@ private let kPersonaFlagsOverride: UInt32 = 1
         }
         return
       }
+      let customEntsPath = (args["customEntsPath"] as? String) ?? ""
+      var helperArgs = ["update", serviceId, srcPath, binaryName]
+      if !customEntsPath.isEmpty {
+        helperArgs.append(customEntsPath)
+      }
       DispatchQueue.global(qos: .userInitiated).async {
-        let output = self.invokeRootHelper(args: ["update", serviceId, srcPath, binaryName])
+        let output = self.invokeRootHelper(args: helperArgs)
         DispatchQueue.main.async {
           result(output)
         }

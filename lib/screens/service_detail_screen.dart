@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 
@@ -23,8 +25,10 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
   late final TextEditingController _portCtrl;
   late final TextEditingController _argsCtrl;
   late final TextEditingController _envCtrl;
+  late final TextEditingController _entsCtrl;
   late final TextEditingController _updateSrcPathCtrl;
 
+  bool _showCustomEnts = false;
   bool _updatingBinary = false;
   bool _savingConfig = false;
 
@@ -38,7 +42,28 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
     _envCtrl = TextEditingController(
       text: s.envVars.entries.map((e) => '${e.key}=${e.value}').join('\n'),
     );
+    _entsCtrl = TextEditingController(
+      text: ServiceItem.generateServiceEntitlementsXml(s.id),
+    );
     _updateSrcPathCtrl = TextEditingController();
+
+    _loadDiskConfig();
+  }
+
+  Future<void> _loadDiskConfig() async {
+    final envRaw = await widget.controller.readServiceEnvRaw(widget.service.id);
+    final entsRaw =
+        await widget.controller.readServiceEntitlementsRaw(widget.service.id);
+    if (mounted) {
+      setState(() {
+        if (envRaw.isNotEmpty) {
+          _envCtrl.text = envRaw;
+        }
+        if (entsRaw.isNotEmpty) {
+          _entsCtrl.text = entsRaw;
+        }
+      });
+    }
   }
 
   @override
@@ -47,6 +72,7 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
     _portCtrl.dispose();
     _argsCtrl.dispose();
     _envCtrl.dispose();
+    _entsCtrl.dispose();
     _updateSrcPathCtrl.dispose();
     super.dispose();
   }
@@ -61,6 +87,30 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
     }
   }
 
+  Future<void> _pickEntitlementsFile() async {
+    HapticFeedback.selectionClick();
+    final path = await widget.controller.bridge.pickBinaryFile();
+    if (path != null && path.isNotEmpty && mounted) {
+      try {
+        final content = File(path).readAsStringSync();
+        setState(() {
+          _entsCtrl.text = content;
+          _showCustomEnts = true;
+        });
+      } catch (e) {
+        _showMessage('读取 entitlements 文件失败: $e');
+      }
+    }
+  }
+
+  void _resetDefaultEntitlements() {
+    setState(() {
+      _entsCtrl.text =
+          ServiceItem.generateServiceEntitlementsXml(widget.service.id);
+    });
+    HapticFeedback.selectionClick();
+  }
+
   Future<void> _handleUpdateBinary() async {
     final newPath = _updateSrcPathCtrl.text.trim();
     if (newPath.isEmpty) {
@@ -71,9 +121,11 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
     setState(() => _updatingBinary = true);
     HapticFeedback.mediumImpact();
 
+    final customEnts = _entsCtrl.text.trim();
     final ok = await widget.controller.updateServiceBinary(
       serviceId: widget.service.id,
       newBinaryPath: newPath,
+      customEntitlementsXml: customEnts.isNotEmpty ? customEnts : null,
     );
 
     if (!mounted) return;
@@ -108,7 +160,10 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
       envVars: envMap,
     );
 
-    await widget.controller.updateServiceConfig(updated);
+    await widget.controller.updateServiceConfig(
+      updated,
+      rawEnvContent: _envCtrl.text,
+    );
     if (!mounted) return;
     setState(() => _savingConfig = false);
     Navigator.of(context).pop(true);
@@ -265,6 +320,88 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
                     ],
                   ),
                   const SizedBox(height: 10),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        '自定义更新权限 (Entitlements)',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      CupertinoButton(
+                        padding: EdgeInsets.zero,
+                        onPressed: () {
+                          setState(() => _showCustomEnts = !_showCustomEnts);
+                        },
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _showCustomEnts ? '收起配置' : '展开自定义',
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            Icon(
+                              _showCustomEnts
+                                  ? CupertinoIcons.chevron_up
+                                  : CupertinoIcons.chevron_down,
+                              size: 13,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (_showCustomEnts) ...[
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        CupertinoButton(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 5,
+                          ),
+                          color: CupertinoColors.tertiarySystemFill
+                              .resolveFrom(context),
+                          onPressed: _pickEntitlementsFile,
+                          child: Text(
+                            '导入 .plist 文件',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: CupertinoColors.label.resolveFrom(context),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        CupertinoButton(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 5,
+                          ),
+                          color: CupertinoColors.tertiarySystemFill
+                              .resolveFrom(context),
+                          onPressed: _resetDefaultEntitlements,
+                          child: Text(
+                            '重置默认权限',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: CupertinoColors.label.resolveFrom(context),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    CupertinoTextField(
+                      controller: _entsCtrl,
+                      maxLines: 8,
+                      placeholder: 'XML 格式的 Entitlements',
+                      padding: const EdgeInsets.all(10),
+                      style: const TextStyle(fontFamily: 'Courier', fontSize: 11),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
                   SizedBox(
                     width: double.infinity,
                     child: CupertinoButton.filled(

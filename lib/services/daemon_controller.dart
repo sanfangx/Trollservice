@@ -94,14 +94,15 @@ class DaemonController extends ChangeNotifier {
     }
   }
 
-  Future<void> _writeEnvFiles(ServiceItem item) async {
+  Future<void> _writeEnvFiles(ServiceItem item, {String? rawEnvContent}) async {
     try {
+      final content = rawEnvContent ?? ServiceItem.formatDotEnv(item.envVars);
       final cfgEnv = File(item.envFilePath(serviceRootPath));
       cfgEnv.parent.createSync(recursive: true);
-      final content = ServiceItem.formatDotEnv(item.envVars);
       cfgEnv.writeAsStringSync(content);
 
       final workEnv = File('${item.serviceDir(serviceRootPath)}/.env');
+      workEnv.parent.createSync(recursive: true);
       workEnv.writeAsStringSync(content);
     } catch (_) {
       // 在无直接文件写入权限时由 RootHelper 托管
@@ -135,10 +136,43 @@ class DaemonController extends ChangeNotifier {
     }
   }
 
+  /// 从磁盘读取当前服务的真实 .env 文件原始文本（优先 .env，其次 config/.env，最后回退内存）
+  Future<String> readServiceEnvRaw(String serviceId) async {
+    final index = _services.indexWhere((s) => s.id == serviceId);
+    if (index < 0) return '';
+    try {
+      final workEnv =
+          File('${_services[index].serviceDir(serviceRootPath)}/.env');
+      if (workEnv.existsSync()) {
+        return workEnv.readAsStringSync();
+      }
+      final cfgEnv = File(_services[index].envFilePath(serviceRootPath));
+      if (cfgEnv.existsSync()) {
+        return cfgEnv.readAsStringSync();
+      }
+    } catch (_) {}
+    return ServiceItem.formatDotEnv(_services[index].envVars);
+  }
+
+  /// 从磁盘读取当前服务专属的 entitlements.plist 原始文本
+  Future<String> readServiceEntitlementsRaw(String serviceId) async {
+    final index = _services.indexWhere((s) => s.id == serviceId);
+    if (index < 0) return ServiceItem.generateServiceEntitlementsXml(serviceId);
+    try {
+      final entsFile =
+          File(_services[index].entitlementsFilePath(serviceRootPath));
+      if (entsFile.existsSync()) {
+        return entsFile.readAsStringSync();
+      }
+    } catch (_) {}
+    return ServiceItem.generateServiceEntitlementsXml(serviceId);
+  }
+
   /// 安装新程序（落盘到 `/var/mobile/Documents/service/<id>` + ldid 赋权 + fastPathSign 签名）
   Future<bool> installService({
     required ServiceItem item,
     required String srcBinaryPath,
+    String? customEntitlementsXml,
   }) async {
     _busyServiceIds.add(item.id);
     _lastError = null;
@@ -149,6 +183,7 @@ class DaemonController extends ChangeNotifier {
         id: item.id,
         srcPath: srcBinaryPath,
         binaryName: item.binaryName,
+        customEntitlementsXml: customEntitlementsXml,
       );
       final ok = (res['ok'] as bool?) ?? false;
       if (!ok) {
@@ -156,7 +191,9 @@ class DaemonController extends ChangeNotifier {
         return false;
       }
 
-      await _writeEnvFiles(item);
+      if (item.envVars.isNotEmpty) {
+        await _writeEnvFiles(item);
+      }
 
       final existingIndex = _services.indexWhere((s) => s.id == item.id);
       if (existingIndex >= 0) {
@@ -177,6 +214,7 @@ class DaemonController extends ChangeNotifier {
   Future<bool> updateServiceBinary({
     required String serviceId,
     required String newBinaryPath,
+    String? customEntitlementsXml,
   }) async {
     final index = _services.indexWhere((s) => s.id == serviceId);
     if (index < 0) {
@@ -197,6 +235,7 @@ class DaemonController extends ChangeNotifier {
         id: current.id,
         srcPath: newBinaryPath,
         binaryName: current.binaryName,
+        customEntitlementsXml: customEntitlementsXml,
       );
       final ok = (res['ok'] as bool?) ?? false;
       if (!ok) {
@@ -226,13 +265,16 @@ class DaemonController extends ChangeNotifier {
   }
 
   /// 修改服务配置（端口、启动参数、环境变量），保留所有数据
-  Future<bool> updateServiceConfig(ServiceItem updated) async {
+  Future<bool> updateServiceConfig(
+    ServiceItem updated, {
+    String? rawEnvContent,
+  }) async {
     final index = _services.indexWhere((s) => s.id == updated.id);
     if (index < 0) return false;
 
     final wasRunning = _services[index].status.isRunning;
     _services[index] = updated.copyWith(updatedAt: DateTime.now());
-    await _writeEnvFiles(_services[index]);
+    await _writeEnvFiles(_services[index], rawEnvContent: rawEnvContent);
     await _saveRegistry();
 
     if (wasRunning) {
@@ -255,7 +297,15 @@ class DaemonController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await _writeEnvFiles(item);
+      // 启动服务时绝不覆写现有的 .env 文件！仅在完全没有 .env 文件且初始配置非空时初始化
+      final workEnv = File('${item.serviceDir(serviceRootPath)}/.env');
+      final cfgEnv = File(item.envFilePath(serviceRootPath));
+      if (!workEnv.existsSync() &&
+          !cfgEnv.existsSync() &&
+          item.envVars.isNotEmpty) {
+        await _writeEnvFiles(item);
+      }
+
       final res = await bridge.startService(
         id: item.id,
         binaryName: item.binaryName,

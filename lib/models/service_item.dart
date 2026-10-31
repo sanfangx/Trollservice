@@ -91,13 +91,7 @@ class ServicePreset {
       defaultBinaryName: 'aistudio2api',
       defaultPort: 2048,
       defaultArgs: ['-open-ui=false'],
-      defaultEnv: {
-        'LISTEN_ADDR': '0.0.0.0:2048',
-        'WAA_BACKEND': 'go',
-        'AISTUDIO_AUTH_STATES': 'accounts',
-        'AUTH_STATES': 'accounts',
-        'LOG_FILE': 'true',
-      },
+      defaultEnv: {},
     ),
     ServicePreset(
       key: 'alist',
