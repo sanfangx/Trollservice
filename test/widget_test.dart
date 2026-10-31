@@ -178,5 +178,120 @@ void main() {
       expect(find.text('已停止'), findsOneWidget);
       expect(find.text('更新 / 配置'), findsOneWidget);
     });
+
+    test('5. AIStudio2API 预设 defaultEnv 默认为空', () {
+      final aistudioPreset = ServicePreset.builtInPresets.firstWhere(
+        (p) => p.defaultId == 'aistudio2api',
+      );
+      expect(aistudioPreset.defaultEnv, isEmpty);
+    });
+
+    test('6. 启动服务绝不覆写已存在的 .env 文件', () async {
+      final v1Bin = File('${tempRoot.path}/dummy_bin')
+        ..writeAsStringSync('BIN');
+      final item = ServiceItem(
+        id: 'env_test_service',
+        name: 'EnvTest',
+        binaryName: 'env_test',
+        port: 8080,
+        envVars: const {'INITIAL_KEY': 'INITIAL_VAL'},
+      );
+
+      await controller.installService(
+        item: item,
+        srcBinaryPath: v1Bin.path,
+      );
+
+      // 模拟用户在 Filza 或终端手动修改工作目录下的 .env 文件
+      final workEnv =
+          File('${item.serviceDir(controller.serviceRootPath)}/.env');
+      expect(workEnv.existsSync(), isTrue);
+      workEnv.writeAsStringSync(
+        'CUSTOM_USER_KEY=CUSTOM_VALUE\nWAA_BACKEND=go\n# Custom comment\n',
+      );
+
+      // 多次启动和停止服务
+      await controller.startService(item.id);
+      expect(
+        workEnv.readAsStringSync(),
+        equals(
+          'CUSTOM_USER_KEY=CUSTOM_VALUE\nWAA_BACKEND=go\n# Custom comment\n',
+        ),
+      );
+
+      await controller.stopService(item.id);
+      await controller.startService(item.id);
+      // 依然 100% 保持用户定制的内容，绝不回滚/覆写
+      expect(
+        workEnv.readAsStringSync(),
+        equals(
+          'CUSTOM_USER_KEY=CUSTOM_VALUE\nWAA_BACKEND=go\n# Custom comment\n',
+        ),
+      );
+    });
+
+    test('7. 安装与更新支持自定义 Entitlements XML', () async {
+      final v1Bin = File('${tempRoot.path}/ents_bin')
+        ..writeAsStringSync('BIN_V1');
+      const customEntsXmlInstall = '''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>custom.install.entitlement</key>
+    <true/>
+</dict>
+</plist>''';
+
+      final item = ServiceItem(
+        id: 'custom_ents_svc',
+        name: 'CustomEntsSvc',
+        binaryName: 'custom_ents',
+        port: 9000,
+      );
+
+      // 1) 安装时带自定义 entitlements
+      final installOk = await controller.installService(
+        item: item,
+        srcBinaryPath: v1Bin.path,
+        customEntitlementsXml: customEntsXmlInstall,
+      );
+      expect(installOk, isTrue);
+
+      final entsFile =
+          File(item.entitlementsFilePath(controller.serviceRootPath));
+      expect(entsFile.existsSync(), isTrue);
+      expect(
+        entsFile.readAsStringSync(),
+        contains('<key>custom.install.entitlement</key>'),
+      );
+
+      // 2) 更新时带新的自定义 entitlements
+      final v2Bin = File('${tempRoot.path}/ents_bin_v2')
+        ..writeAsStringSync('BIN_V2');
+      const customEntsXmlUpdate = '''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>custom.update.entitlement.v2</key>
+    <string>enabled</string>
+</dict>
+</plist>''';
+
+      final updateOk = await controller.updateServiceBinary(
+        serviceId: item.id,
+        newBinaryPath: v2Bin.path,
+        customEntitlementsXml: customEntsXmlUpdate,
+      );
+      expect(updateOk, isTrue);
+
+      expect(
+        entsFile.readAsStringSync(),
+        contains('<key>custom.update.entitlement.v2</key>'),
+      );
+      expect(
+        entsFile.readAsStringSync(),
+        contains('<string>enabled</string>'),
+      );
+    });
   });
 }

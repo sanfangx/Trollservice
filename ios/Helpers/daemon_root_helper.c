@@ -459,7 +459,7 @@ static int cmd_init_workspace(void) {
     return 0;
 }
 
-static int cmd_install(const char* service_id, const char* src_path, const char* binary_name) {
+static int cmd_install(const char* service_id, const char* src_path, const char* binary_name, const char* custom_ents_path) {
     if (!validate_macho_arm64(src_path)) {
         printf("{\"ok\":false,\"error\":\"文件不是有效的 iOS/Darwin ARM64 Mach-O 可执行文件\"}\n");
         return 1;
@@ -488,9 +488,18 @@ static int cmd_install(const char* service_id, const char* src_path, const char*
         return 1;
     }
 
-    if (write_service_entitlements(ents_plist, service_id) != 0) {
-        printf("{\"ok\":false,\"error\":\"生成 entitlements.plist 失败\"}\n");
-        return 1;
+    if (custom_ents_path && custom_ents_path[0] != '\0' && access(custom_ents_path, R_OK) == 0) {
+        if (copy_file_binary(custom_ents_path, ents_plist) != 0) {
+            printf("{\"ok\":false,\"error\":\"应用自定义 entitlements.plist 失败\"}\n");
+            return 1;
+        }
+        chown(ents_plist, MOBILE_UID, MOBILE_GID);
+        chmod(ents_plist, 0644);
+    } else {
+        if (write_service_entitlements(ents_plist, service_id) != 0) {
+            printf("{\"ok\":false,\"error\":\"生成 entitlements.plist 失败\"}\n");
+            return 1;
+        }
     }
 
     char err_msg[512] = {0};
@@ -509,8 +518,9 @@ static int cmd_install(const char* service_id, const char* src_path, const char*
  * 2. 若服务正在运行，先优雅停止进程释放文件锁与数据库锁
  * 3. 仅覆盖 bin/<binary_name> 并重新执行 ldid -S + fastPathSign 签名赋权
  * 4. 100% 原样保留服务目录下的 config/, runtime/, accounts/, 数据库等全部数据
+ * 5. 支持传入自定义 entitlements.plist
  */
-static int cmd_update(const char* service_id, const char* new_src_path, const char* binary_name) {
+static int cmd_update(const char* service_id, const char* new_src_path, const char* binary_name, const char* custom_ents_path) {
     if (!validate_macho_arm64(new_src_path)) {
         printf("{\"ok\":false,\"error\":\"新文件不是有效的 iOS/Darwin ARM64 Mach-O 可执行文件，已中止更新，原程序与数据未受影响\"}\n");
         return 1;
@@ -543,9 +553,18 @@ static int cmd_update(const char* service_id, const char* new_src_path, const ch
     snprintf(dst_bin, sizeof(dst_bin), "%s/%s", bin_dir, binary_name);
     snprintf(ents_plist, sizeof(ents_plist), "%s/entitlements.plist", cfg_dir);
 
-    struct stat st;
-    if (stat(ents_plist, &st) != 0) {
-        write_service_entitlements(ents_plist, service_id);
+    if (custom_ents_path && custom_ents_path[0] != '\0' && access(custom_ents_path, R_OK) == 0) {
+        if (copy_file_binary(custom_ents_path, ents_plist) != 0) {
+            printf("{\"ok\":false,\"error\":\"应用自定义 entitlements.plist 失败\"}\n");
+            return 1;
+        }
+        chown(ents_plist, MOBILE_UID, MOBILE_GID);
+        chmod(ents_plist, 0644);
+    } else {
+        struct stat st;
+        if (stat(ents_plist, &st) != 0) {
+            write_service_entitlements(ents_plist, service_id);
+        }
     }
 
     if (copy_file_binary(new_src_path, dst_bin) != 0) {
@@ -598,13 +617,14 @@ static int cmd_start(int argc, char* argv[]) {
     }
 
     setenv("HOME", "/var/mobile", 1);
-    struct stat st;
-    if (stat(env_cfg_path, &st) == 0) {
+    struct stat st_work;
+    struct stat st_cfg;
+    if (stat(env_work_path, &st_work) == 0) {
+        load_dotenv_into_environ(env_work_path);
+    } else if (stat(env_cfg_path, &st_cfg) == 0) {
         load_dotenv_into_environ(env_cfg_path);
         copy_file_binary(env_cfg_path, env_work_path);
         chmod(env_work_path, 0644);
-    } else if (stat(env_work_path, &st) == 0) {
-        load_dotenv_into_environ(env_work_path);
     }
 
     int extra_args = argc - 4;
@@ -743,9 +763,9 @@ int main(int argc, char* argv[]) {
     if (strcmp(cmd, "init-workspace") == 0) {
         return cmd_init_workspace();
     } else if (strcmp(cmd, "install") == 0 && argc >= 5) {
-        return cmd_install(argv[2], argv[3], argv[4]);
+        return cmd_install(argv[2], argv[3], argv[4], argc >= 6 ? argv[5] : NULL);
     } else if (strcmp(cmd, "update") == 0 && argc >= 5) {
-        return cmd_update(argv[2], argv[3], argv[4]);
+        return cmd_update(argv[2], argv[3], argv[4], argc >= 6 ? argv[5] : NULL);
     } else if (strcmp(cmd, "start") == 0) {
         return cmd_start(argc, argv);
     } else if (strcmp(cmd, "stop") == 0 && argc >= 3) {
