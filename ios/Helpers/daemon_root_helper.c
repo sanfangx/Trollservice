@@ -31,6 +31,28 @@
 
 static char g_service_root[PATH_MAX] = {0};
 
+/* 递归创建目录并赋予 mobile 权限 */
+static int mkdir_p(const char* path, mode_t mode) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    size_t len = strlen(tmp);
+    if (len == 0) return -1;
+    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
+
+    for (char* p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, mode);
+            chown(tmp, MOBILE_UID, MOBILE_GID);
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    chown(tmp, MOBILE_UID, MOBILE_GID);
+    return 0;
+}
 static const char* get_service_root(void) {
     if (g_service_root[0] != '\0') {
         return g_service_root;
@@ -38,6 +60,7 @@ static const char* get_service_root(void) {
     const char* env_root = getenv("TROLLSERVICE_ROOT");
     if (env_root && env_root[0] != '\0') {
         strncpy(g_service_root, env_root, sizeof(g_service_root) - 1);
+        g_service_root[sizeof(g_service_root) - 1] = '\0';
         return g_service_root;
     }
     FILE* fp = fopen(ROOT_CONFIG_PATH, "r");
@@ -50,6 +73,7 @@ static const char* get_service_root(void) {
             }
             if (len > 0) {
                 strncpy(g_service_root, buf, sizeof(g_service_root) - 1);
+                g_service_root[sizeof(g_service_root) - 1] = '\0';
                 fclose(fp);
                 return g_service_root;
             }
@@ -57,17 +81,16 @@ static const char* get_service_root(void) {
         fclose(fp);
     }
     strncpy(g_service_root, DEFAULT_SERVICE_ROOT, sizeof(g_service_root) - 1);
+    g_service_root[sizeof(g_service_root) - 1] = '\0';
     return g_service_root;
 }
 
-static int cmd_set_root(const char* new_root) {
+static int set_service_root_internal(const char* new_root) {
     if (!new_root || new_root[0] == '\0') {
-        printf("{\"ok\":false,\"error\":\"无效路径\"}\n");
-        return 1;
+        return -1;
     }
     if (mkdir_p(new_root, 0755) != 0) {
-        printf("{\"ok\":false,\"error\":\"无法创建目录: %s\"}\n", new_root);
-        return 1;
+        return -2;
     }
     chown(new_root, MOBILE_UID, MOBILE_GID);
     FILE* fp = fopen(ROOT_CONFIG_PATH, "w");
@@ -78,6 +101,19 @@ static int cmd_set_root(const char* new_root) {
         chmod(ROOT_CONFIG_PATH, 0644);
     }
     strncpy(g_service_root, new_root, sizeof(g_service_root) - 1);
+    g_service_root[sizeof(g_service_root) - 1] = '\0';
+    return 0;
+}
+
+static int cmd_set_root(const char* new_root) {
+    int res = set_service_root_internal(new_root);
+    if (res == -1) {
+        printf("{\"ok\":false,\"error\":\"无效路径\"}\n");
+        return 1;
+    } else if (res == -2) {
+        printf("{\"ok\":false,\"error\":\"无法创建目录: %s\"}\n", new_root);
+        return 1;
+    }
     printf("{\"ok\":true,\"root\":\"%s\"}\n", new_root);
     return 0;
 }
@@ -151,28 +187,6 @@ static uint32_t swap_uint32(uint32_t val) {
            ((val >> 8)  & 0x0000FF00) |
            ((val << 8)  & 0x00FF0000) |
            ((val << 24) & 0xFF000000);
-}
-
-static int mkdir_p(const char* path, mode_t mode) {
-    char tmp[PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "%s", path);
-    size_t len = strlen(tmp);
-    if (len == 0) return -1;
-    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
-
-    for (char* p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            mkdir(tmp, mode);
-            chown(tmp, MOBILE_UID, MOBILE_GID);
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
-        return -1;
-    }
-    chown(tmp, MOBILE_UID, MOBILE_GID);
-    return 0;
 }
 
 static int copy_file_binary(const char* src, const char* dst) {
@@ -506,7 +520,7 @@ static int cmd_init_workspace(const char* custom_root) {
     kill_processes_by_comm_prefix("daemon_root_hel", SIGKILL);
 
     if (custom_root && custom_root[0] != '\0') {
-        cmd_set_root(custom_root);
+        set_service_root_internal(custom_root);
     }
     const char* root = get_service_root();
     if (mkdir_p(root, 0755) != 0) {
