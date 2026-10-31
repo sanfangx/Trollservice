@@ -24,9 +24,63 @@
 
 #include "spawn_root.h"
 
-#define SERVICE_ROOT "/var/mobile/Documents/service"
+#define DEFAULT_SERVICE_ROOT "/var/mobile/Documents/service"
+#define ROOT_CONFIG_PATH "/var/mobile/Documents/.trollservice_root"
 #define MOBILE_UID 501
 #define MOBILE_GID 501
+
+static char g_service_root[PATH_MAX] = {0};
+
+static const char* get_service_root(void) {
+    if (g_service_root[0] != '\0') {
+        return g_service_root;
+    }
+    const char* env_root = getenv("TROLLSERVICE_ROOT");
+    if (env_root && env_root[0] != '\0') {
+        strncpy(g_service_root, env_root, sizeof(g_service_root) - 1);
+        return g_service_root;
+    }
+    FILE* fp = fopen(ROOT_CONFIG_PATH, "r");
+    if (fp) {
+        char buf[PATH_MAX] = {0};
+        if (fgets(buf, sizeof(buf) - 1, fp)) {
+            size_t len = strlen(buf);
+            while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r' || buf[len - 1] == ' ')) {
+                buf[--len] = '\0';
+            }
+            if (len > 0) {
+                strncpy(g_service_root, buf, sizeof(g_service_root) - 1);
+                fclose(fp);
+                return g_service_root;
+            }
+        }
+        fclose(fp);
+    }
+    strncpy(g_service_root, DEFAULT_SERVICE_ROOT, sizeof(g_service_root) - 1);
+    return g_service_root;
+}
+
+static int cmd_set_root(const char* new_root) {
+    if (!new_root || new_root[0] == '\0') {
+        printf("{\"ok\":false,\"error\":\"无效路径\"}\n");
+        return 1;
+    }
+    if (mkdir_p(new_root, 0755) != 0) {
+        printf("{\"ok\":false,\"error\":\"无法创建目录: %s\"}\n", new_root);
+        return 1;
+    }
+    chown(new_root, MOBILE_UID, MOBILE_GID);
+    FILE* fp = fopen(ROOT_CONFIG_PATH, "w");
+    if (fp) {
+        fprintf(fp, "%s\n", new_root);
+        fclose(fp);
+        chown(ROOT_CONFIG_PATH, MOBILE_UID, MOBILE_GID);
+        chmod(ROOT_CONFIG_PATH, 0644);
+    }
+    strncpy(g_service_root, new_root, sizeof(g_service_root) - 1);
+    printf("{\"ok\":true,\"root\":\"%s\"}\n", new_root);
+    return 0;
+}
 
 /* XNU Private memorystatus_control API for Jetsam exemption */
 #define MEMORYSTATUS_CMD_SET_JETSAM_HIGH_WATER_MARK 5
@@ -374,8 +428,8 @@ static void kill_processes_by_comm_prefix(const char* prefix, int sig) {
 static int stop_service_internal(const char* service_id) {
     char sup_pid_path[PATH_MAX];
     char svc_pid_path[PATH_MAX];
-    snprintf(sup_pid_path, sizeof(sup_pid_path), "%s/%s/runtime/supervisor.pid", SERVICE_ROOT, service_id);
-    snprintf(svc_pid_path, sizeof(svc_pid_path), "%s/%s/runtime/service.pid", SERVICE_ROOT, service_id);
+    snprintf(sup_pid_path, sizeof(sup_pid_path), "%s/%s/runtime/supervisor.pid", get_service_root(), service_id);
+    snprintf(svc_pid_path, sizeof(svc_pid_path), "%s/%s/runtime/service.pid", get_service_root(), service_id);
 
     /* 清理旧版可能遗留的 supervisor 进程 */
     pid_t sup_pid = read_pid_file(sup_pid_path);
@@ -447,15 +501,19 @@ static void load_dotenv_into_environ(const char* env_file_path) {
     fclose(fp);
 }
 
-static int cmd_init_workspace(void) {
+static int cmd_init_workspace(const char* custom_root) {
     /* 自动清理旧版可能遗留在后台的 supervise 循环进程 */
     kill_processes_by_comm_prefix("daemon_root_hel", SIGKILL);
 
-    if (mkdir_p(SERVICE_ROOT, 0755) != 0) {
-        printf("{\"ok\":false,\"error\":\"创建 %s 失败\"}\n", SERVICE_ROOT);
+    if (custom_root && custom_root[0] != '\0') {
+        cmd_set_root(custom_root);
+    }
+    const char* root = get_service_root();
+    if (mkdir_p(root, 0755) != 0) {
+        printf("{\"ok\":false,\"error\":\"创建 %s 失败\"}\n", root);
         return 1;
     }
-    printf("{\"ok\":true,\"root\":\"%s\"}\n", SERVICE_ROOT);
+    printf("{\"ok\":true,\"root\":\"%s\"}\n", root);
     return 0;
 }
 
@@ -469,7 +527,7 @@ static int cmd_install(const char* service_id, const char* src_path, const char*
     char bin_dir[PATH_MAX];
     char cfg_dir[PATH_MAX];
     char run_dir[PATH_MAX];
-    snprintf(base_dir, sizeof(base_dir), "%s/%s", SERVICE_ROOT, service_id);
+    snprintf(base_dir, sizeof(base_dir), "%s/%s", get_service_root(), service_id);
     snprintf(bin_dir, sizeof(bin_dir), "%s/bin", base_dir);
     snprintf(cfg_dir, sizeof(cfg_dir), "%s/config", base_dir);
     snprintf(run_dir, sizeof(run_dir), "%s/runtime", base_dir);
@@ -530,7 +588,7 @@ static int cmd_update(const char* service_id, const char* new_src_path, const ch
     char bin_dir[PATH_MAX];
     char cfg_dir[PATH_MAX];
     char run_dir[PATH_MAX];
-    snprintf(base_dir, sizeof(base_dir), "%s/%s", SERVICE_ROOT, service_id);
+    snprintf(base_dir, sizeof(base_dir), "%s/%s", get_service_root(), service_id);
     snprintf(bin_dir, sizeof(bin_dir), "%s/bin", base_dir);
     snprintf(cfg_dir, sizeof(cfg_dir), "%s/config", base_dir);
     snprintf(run_dir, sizeof(run_dir), "%s/runtime", base_dir);
@@ -598,7 +656,7 @@ static int cmd_start(int argc, char* argv[]) {
     char log_path[PATH_MAX];
     char svc_pid_path[PATH_MAX];
 
-    snprintf(base_dir, sizeof(base_dir), "%s/%s", SERVICE_ROOT, service_id);
+    snprintf(base_dir, sizeof(base_dir), "%s/%s", get_service_root(), service_id);
     snprintf(bin_path, sizeof(bin_path), "%s/bin/%s", base_dir, binary_name);
     snprintf(env_cfg_path, sizeof(env_cfg_path), "%s/config/.env", base_dir);
     snprintf(env_work_path, sizeof(env_work_path), "%s/.env", base_dir);
@@ -685,7 +743,7 @@ static int cmd_start(int argc, char* argv[]) {
 
 static int cmd_status(const char* service_id) {
     char svc_pid_path[PATH_MAX];
-    snprintf(svc_pid_path, sizeof(svc_pid_path), "%s/%s/runtime/service.pid", SERVICE_ROOT, service_id);
+    snprintf(svc_pid_path, sizeof(svc_pid_path), "%s/%s/runtime/service.pid", get_service_root(), service_id);
     pid_t pid = read_pid_file(svc_pid_path);
 
     if (!is_pid_alive(pid)) {
@@ -744,7 +802,7 @@ static int remove_directory_recursive(const char* path) {
 static int cmd_uninstall(const char* service_id) {
     stop_service_internal(service_id);
     char base_dir[PATH_MAX];
-    snprintf(base_dir, sizeof(base_dir), "%s/%s", SERVICE_ROOT, service_id);
+    snprintf(base_dir, sizeof(base_dir), "%s/%s", get_service_root(), service_id);
     remove_directory_recursive(base_dir);
     printf("{\"ok\":true,\"action\":\"uninstall\"}\n");
     return 0;
@@ -752,7 +810,7 @@ static int cmd_uninstall(const char* service_id) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        printf("{\"ok\":false,\"error\":\"用法: daemon_root_helper <init-workspace|install|update|start|stop|status|uninstall>\"}\n");
+        printf("{\"ok\":false,\"error\":\"用法: daemon_root_helper <init-workspace|set-root|install|update|start|stop|status|uninstall>\"}\n");
         return 1;
     }
 
@@ -761,7 +819,9 @@ int main(int argc, char* argv[]) {
 
     const char* cmd = argv[1];
     if (strcmp(cmd, "init-workspace") == 0) {
-        return cmd_init_workspace();
+        return cmd_init_workspace(argc >= 3 ? argv[2] : NULL);
+    } else if (strcmp(cmd, "set-root") == 0 && argc >= 3) {
+        return cmd_set_root(argv[2]);
     } else if (strcmp(cmd, "install") == 0 && argc >= 5) {
         return cmd_install(argv[2], argv[3], argv[4], argc >= 6 ? argv[5] : NULL);
     } else if (strcmp(cmd, "update") == 0 && argc >= 5) {

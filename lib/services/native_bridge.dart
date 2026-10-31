@@ -4,8 +4,11 @@ import '../models/service_item.dart';
 
 /// 底层 RootHelper 与原生系统能力桥接接口
 abstract class ServiceNativeBridge {
-  /// 服务安装根路径（真机固定为 /var/mobile/Documents/service）
+  /// 服务安装根路径（默认 /var/mobile/Documents/service）
   String get serviceRootPath;
+
+  /// 自定义修改服务安装根路径
+  Future<bool> setServiceRootPath(String path);
 
   /// 初始化 /var/mobile/Documents/service 工作目录
   Future<Map<String, dynamic>> initWorkspace();
@@ -60,12 +63,26 @@ class MethodChannelServiceBridge implements ServiceNativeBridge {
   static const MethodChannel _channel =
       MethodChannel('com.magicfall.trollservice/bridge');
 
-  @override
-  final String serviceRootPath;
+  String _serviceRootPath;
 
-  const MethodChannelServiceBridge({
-    this.serviceRootPath = kDefaultServiceRoot,
+  @override
+  String get serviceRootPath => _serviceRootPath;
+
+  MethodChannelServiceBridge({
+    this._serviceRootPath = kDefaultServiceRoot,
   });
+
+  @override
+  Future<bool> setServiceRootPath(String path) async {
+    _serviceRootPath = path;
+    try {
+      final res = await _channel.invokeMethod<Object?>('setServiceRoot', {'root': path});
+      final map = _normalizeMap(res);
+      return (map['ok'] as bool?) ?? false;
+    } catch (_) {
+      return true;
+    }
+  }
 
   Map<String, dynamic> _normalizeMap(Object? raw) {
     if (raw is Map) {
@@ -258,14 +275,26 @@ class MethodChannelServiceBridge implements ServiceNativeBridge {
 
 /// 用于本地开发、桌面预览及自动化单元测试的本地文件系统实现（完全复刻 daemon_root_helper 的目录与保留数据行为）
 class FileSystemMockServiceBridge implements ServiceNativeBridge {
+  String _serviceRootPath;
+
   @override
-  final String serviceRootPath;
+  String get serviceRootPath => _serviceRootPath;
 
   final Map<String, ServiceRuntimeStatus> _runningStates = {};
   final List<String> executedSignCommands = [];
   String? mockPickedFilePath;
 
-  FileSystemMockServiceBridge({required this.serviceRootPath});
+  FileSystemMockServiceBridge({required this._serviceRootPath});
+
+  @override
+  Future<bool> setServiceRootPath(String path) async {
+    _serviceRootPath = path;
+    final dir = Directory(path);
+    if (!dir.existsSync()) {
+      dir.createSync(recursive: true);
+    }
+    return true;
+  }
 
   @override
   Future<Map<String, dynamic>> initWorkspace() async {

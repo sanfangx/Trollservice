@@ -28,6 +28,7 @@ private let kPersonaFlagsOverride: UInt32 = 1
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate, UIDocumentPickerDelegate {
   private var bridgeChannel: FlutterMethodChannel?
   private var pendingPickerResult: FlutterResult?
+  private var currentServiceRoot: String = UserDefaults.standard.string(forKey: "TrollServiceCustomRoot") ?? "/var/mobile/Documents/service"
 
   override func application(
     _ application: UIApplication,
@@ -53,8 +54,29 @@ private let kPersonaFlagsOverride: UInt32 = 1
   private func handleBridgeCall(call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
     case "initWorkspace":
+      let customRoot = (call.arguments as? [String: Any])?["root"] as? String ?? self.currentServiceRoot
+      self.currentServiceRoot = customRoot
+      setenv("TROLLSERVICE_ROOT", customRoot, 1)
       DispatchQueue.global(qos: .userInitiated).async {
-        let output = self.invokeRootHelper(args: ["init-workspace"])
+        let output = self.invokeRootHelper(args: ["init-workspace", customRoot])
+        DispatchQueue.main.async {
+          result(output)
+        }
+      }
+
+    case "setServiceRoot":
+      guard let args = call.arguments as? [String: Any],
+            let newRoot = args["root"] as? String, !newRoot.isEmpty else {
+        DispatchQueue.main.async {
+          result(["ok": false, "error": "setServiceRoot 缺少路径参数"])
+        }
+        return
+      }
+      self.currentServiceRoot = newRoot
+      UserDefaults.standard.set(newRoot, forKey: "TrollServiceCustomRoot")
+      setenv("TROLLSERVICE_ROOT", newRoot, 1)
+      DispatchQueue.global(qos: .userInitiated).async {
+        let output = self.invokeRootHelper(args: ["set-root", newRoot])
         DispatchQueue.main.async {
           result(output)
         }
@@ -213,6 +235,8 @@ private let kPersonaFlagsOverride: UInt32 = 1
     guard FileManager.default.fileExists(atPath: helperPath) else {
       return ["ok": false, "error": "未找到内置 daemon_root_helper: \(helperPath)"]
     }
+
+    setenv("TROLLSERVICE_ROOT", currentServiceRoot, 1)
 
     var allArgs = [helperPath]
     allArgs.append(contentsOf: args)

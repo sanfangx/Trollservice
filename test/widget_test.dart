@@ -29,7 +29,7 @@ void main() {
     });
 
     test('1. 默认安装根路径严格为 /var/mobile/Documents/service', () {
-      const defaultBridge = MethodChannelServiceBridge();
+      final defaultBridge = MethodChannelServiceBridge();
       expect(defaultBridge.serviceRootPath, equals('/var/mobile/Documents/service'));
 
       final item = ServiceItem(
@@ -156,7 +156,7 @@ void main() {
       expect(controller.services.first.status.isRunning, isTrue);
     });
 
-    testWidgets('4. UI 仪表盘展示默认路径、服务卡片与状态开关', (WidgetTester tester) async {
+    testWidgets('4. UI 仪表盘展示服务卡片与状态开关', (WidgetTester tester) async {
       final v1Bin = File('${tempRoot.path}/aistudio2api_bin')
         ..writeAsStringSync('MACH_O_ARM64');
 
@@ -173,10 +173,10 @@ void main() {
       await tester.pumpWidget(TrollServiceApp(controller: controller));
       await tester.pumpAndSettle();
 
-      expect(find.text('TrollService 服务管理'), findsOneWidget);
+      expect(find.text('TrollService'), findsOneWidget);
       expect(find.text('AIStudio2API'), findsOneWidget);
-      expect(find.text('已停止'), findsOneWidget);
-      expect(find.text('更新 / 配置'), findsOneWidget);
+      expect(find.textContaining('已停止'), findsOneWidget);
+      expect(find.text('配置'), findsOneWidget);
     });
 
     test('5. AIStudio2API 预设 defaultEnv 默认为空', () {
@@ -292,6 +292,64 @@ void main() {
         entsFile.readAsStringSync(),
         contains('<string>enabled</string>'),
       );
+    });
+
+    test('8. 支持自定义安装根路径并自动创建工作空间与加载服务', () async {
+      final customRoot = '${tempRoot.path}/custom_service_dir';
+      final ok = await controller.setCustomServiceRootPath(customRoot);
+      expect(ok, isTrue);
+      expect(controller.serviceRootPath, equals(customRoot));
+      expect(Directory(customRoot).existsSync(), isTrue);
+
+      final bin = File('${tempRoot.path}/my_bin')..writeAsStringSync('MACH_O_CUSTOM');
+      final item = ServiceItem(
+        id: 'custom_path_svc',
+        name: 'CustomPathSvc',
+        binaryName: 'my_bin',
+        port: 3000,
+      );
+
+      final installed = await controller.installService(
+        item: item,
+        srcBinaryPath: bin.path,
+      );
+      expect(installed, isTrue);
+      expect(
+        item.binaryPath(controller.serviceRootPath),
+        equals('$customRoot/custom_path_svc/bin/my_bin'),
+      );
+      expect(File(item.binaryPath(controller.serviceRootPath)).existsSync(), isTrue);
+    });
+
+    test('9. 全局一键停止所有服务与清空所有日志', () async {
+      final bin = File('${tempRoot.path}/test_bin')..writeAsStringSync('BIN');
+      final item = ServiceItem(
+        id: 'global_ops_svc',
+        name: 'GlobalOpsSvc',
+        binaryName: 'test_bin',
+        port: 4000,
+      );
+
+      await controller.installService(
+        item: item,
+        srcBinaryPath: bin.path,
+      );
+      await controller.startService(item.id);
+      expect(controller.services.first.status.isRunning, isTrue);
+
+      // 写入模拟日志
+      final logFile = File(item.stdoutLogPath(controller.serviceRootPath));
+      logFile.writeAsStringSync('Some debug logs...\nLine 2\n');
+      expect(logFile.readAsStringSync(), isNotEmpty);
+
+      // 清理全部日志
+      final cleared = await controller.clearAllLogs();
+      expect(cleared, equals(1));
+      expect(logFile.readAsStringSync(), isEmpty);
+
+      // 一键停止全部服务
+      await controller.stopAllServices();
+      expect(controller.services.first.status.isRunning, isFalse);
     });
   });
 }

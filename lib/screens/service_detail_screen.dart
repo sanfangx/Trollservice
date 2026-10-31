@@ -133,7 +133,7 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
 
     if (ok) {
       HapticFeedback.heavyImpact();
-      _showMessage('程序已成功更新并重新完成 ldid + fastPathSign 签名赋权，所有原有程序数据均已完整保留！');
+      _showMessage('程序已成功更新并重新签名赋权，数据完好保留。');
     } else {
       _showMessage(widget.controller.lastError ?? '更新程序失败');
     }
@@ -177,9 +177,7 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
         content: Padding(
           padding: const EdgeInsets.only(top: 8),
           child: Text(
-            '卸载将停止该服务并删除目录:\n'
-            '${widget.service.serviceDir(widget.controller.serviceRootPath)}\n'
-            '如果您只想升级版本并保留数据，请使用上方的「更新程序」功能。',
+            '将停止服务并清理目录:\n${widget.service.serviceDir(widget.controller.serviceRootPath)}',
           ),
         ),
         actions: [
@@ -226,19 +224,21 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
   @override
   Widget build(BuildContext context) {
     final root = widget.controller.serviceRootPath;
-    final binPath = widget.service.binaryPath(root);
     final dataDir = widget.service.serviceDir(root);
+    final status = widget.service.status;
 
     return CupertinoPageScaffold(
+      backgroundColor:
+          CupertinoColors.systemGroupedBackground.resolveFrom(context),
       navigationBar: CupertinoNavigationBar(
-        middle: Text('${widget.service.name} 更新与配置'),
+        middle: Text(widget.service.name),
         trailing: _savingConfig
             ? const CupertinoActivityIndicator()
             : CupertinoButton(
                 padding: EdgeInsets.zero,
                 onPressed: _handleSaveConfig,
                 child: const Text(
-                  '保存配置',
+                  '保存',
                   style: TextStyle(fontWeight: FontWeight.w600),
                 ),
               ),
@@ -248,169 +248,139 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
           physics: const BouncingScrollPhysics(
             parent: AlwaysScrollableScrollPhysics(),
           ),
-          padding: const EdgeInsets.all(16),
           children: [
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: CupertinoColors.secondarySystemGroupedBackground
-                    .resolveFrom(context),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: CupertinoColors.activeBlue.withValues(alpha: 0.35),
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Row(
-                    children: [
-                      Icon(
-                        CupertinoIcons.arrow_2_circlepath_circle_fill,
-                        color: CupertinoColors.activeBlue,
-                        size: 20,
-                      ),
-                      SizedBox(width: 6),
-                      Text(
-                        '更新程序（保留全部程序数据）',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    '仅替换可执行文件 ($binPath) 并重新执行 ldid -S 赋权与 fastPathSign 签名；'
-                    '工作目录 ($dataDir) 下的数据库、账户凭证、配置文件将 100% 原样保留。',
+            CupertinoListSection.insetGrouped(
+              header: const Text('服务信息'),
+              children: [
+                CupertinoListTile(
+                  title: const Text('运行状态'),
+                  additionalInfo: Text(
+                    status.isRunning ? '正在运行 (PID: ${status.pid})' : '已停止',
                     style: TextStyle(
-                      fontSize: 12,
-                      height: 1.4,
-                      color: CupertinoColors.secondaryLabel.resolveFrom(context),
+                      color: status.isRunning
+                          ? CupertinoColors.activeGreen
+                          : CupertinoColors.secondaryLabel,
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: CupertinoTextField(
-                          controller: _updateSrcPathCtrl,
-                          placeholder: '选择或输入新版二进制文件路径',
-                          padding: const EdgeInsets.all(10),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      CupertinoButton(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 8,
-                        ),
-                        color: CupertinoColors.tertiarySystemFill
-                            .resolveFrom(context),
-                        onPressed: _pickUpdateBinary,
-                        child: Text(
-                          '浏览文件',
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: CupertinoColors.label.resolveFrom(context),
-                          ),
-                        ),
-                      ),
-                    ],
+                ),
+                CupertinoListTile(
+                  title: const Text('工作目录'),
+                  subtitle: Text(
+                    dataDir,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontFamily: 'Courier',
+                    ),
                   ),
-                  const SizedBox(height: 10),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text(
-                        '自定义更新权限 (Entitlements)',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      CupertinoButton(
-                        padding: EdgeInsets.zero,
-                        onPressed: () {
-                          setState(() => _showCustomEnts = !_showCustomEnts);
-                        },
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
+                  trailing: const CupertinoListTileChevron(),
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    Clipboard.setData(ClipboardData(text: dataDir));
+                    _showMessage('工作目录路径已复制到剪贴板:\n$dataDir');
+                  },
+                ),
+              ],
+            ),
+            CupertinoListSection.insetGrouped(
+              header: const Text('版本更新 (自动保留数据)'),
+              children: [
+                CupertinoListTile(
+                  title: const Text('新版二进制文件'),
+                  subtitle: Text(
+                    _updateSrcPathCtrl.text.isEmpty
+                        ? '请选择新版 Mach-O 文件'
+                        : _updateSrcPathCtrl.text,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontFamily:
+                          _updateSrcPathCtrl.text.isEmpty ? null : 'Courier',
+                    ),
+                  ),
+                  trailing: CupertinoButton.filled(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    onPressed: _pickUpdateBinary,
+                    child: const Text('浏览', style: TextStyle(fontSize: 13)),
+                  ),
+                ),
+                CupertinoListTile(
+                  title: const Text('自定义更新权限 (可选)'),
+                  trailing: Icon(
+                    _showCustomEnts
+                        ? CupertinoIcons.chevron_up
+                        : CupertinoIcons.chevron_down,
+                    size: 14,
+                    color: CupertinoColors.secondaryLabel.resolveFrom(context),
+                  ),
+                  onTap: () =>
+                      setState(() => _showCustomEnts = !_showCustomEnts),
+                ),
+                if (_showCustomEnts)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                    child: Column(
+                      children: [
+                        Row(
                           children: [
-                            Text(
-                              _showCustomEnts ? '收起配置' : '展开自定义',
-                              style: const TextStyle(fontSize: 12),
+                            CupertinoButton(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 4,
+                              ),
+                              color: CupertinoColors.tertiarySystemFill
+                                  .resolveFrom(context),
+                              onPressed: _pickEntitlementsFile,
+                              child: Text(
+                                '导入 .plist',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: CupertinoColors.label
+                                      .resolveFrom(context),
+                                ),
+                              ),
                             ),
-                            Icon(
-                              _showCustomEnts
-                                  ? CupertinoIcons.chevron_up
-                                  : CupertinoIcons.chevron_down,
-                              size: 13,
+                            const SizedBox(width: 8),
+                            CupertinoButton(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 4,
+                              ),
+                              color: CupertinoColors.tertiarySystemFill
+                                  .resolveFrom(context),
+                              onPressed: _resetDefaultEntitlements,
+                              child: Text(
+                                '重置默认',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: CupertinoColors.label
+                                      .resolveFrom(context),
+                                ),
+                              ),
                             ),
                           ],
                         ),
-                      ),
-                    ],
-                  ),
-                  if (_showCustomEnts) ...[
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        CupertinoButton(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 5,
-                          ),
-                          color: CupertinoColors.tertiarySystemFill
-                              .resolveFrom(context),
-                          onPressed: _pickEntitlementsFile,
-                          child: Text(
-                            '导入 .plist 文件',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: CupertinoColors.label.resolveFrom(context),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        CupertinoButton(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 5,
-                          ),
-                          color: CupertinoColors.tertiarySystemFill
-                              .resolveFrom(context),
-                          onPressed: _resetDefaultEntitlements,
-                          child: Text(
-                            '重置默认权限',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: CupertinoColors.label.resolveFrom(context),
-                            ),
+                        const SizedBox(height: 8),
+                        CupertinoTextField(
+                          controller: _entsCtrl,
+                          maxLines: 6,
+                          padding: const EdgeInsets.all(10),
+                          style: const TextStyle(
+                            fontFamily: 'Courier',
+                            fontSize: 11,
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
-                    CupertinoTextField(
-                      controller: _entsCtrl,
-                      maxLines: 8,
-                      placeholder: 'XML 格式的 Entitlements',
-                      padding: const EdgeInsets.all(10),
-                      style: const TextStyle(fontFamily: 'Courier', fontSize: 11),
-                    ),
-                  ],
-                  const SizedBox(height: 12),
-                  SizedBox(
+                  ),
+                Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: SizedBox(
                     width: double.infinity,
                     child: CupertinoButton.filled(
-                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
                       onPressed: _updatingBinary ? null : _handleUpdateBinary,
                       child: Text(
-                        _updatingBinary
-                            ? '正在替换并重签名...'
-                            : '立即更新程序（保留全部数据）',
+                        _updatingBinary ? '正在更新与签名...' : '更新程序',
                         style: const TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w600,
@@ -418,79 +388,87 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
                       ),
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-            const SizedBox(height: 22),
-            const Text(
-              '运行参数与环境变量配置',
-              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+            CupertinoListSection.insetGrouped(
+              header: const Text('运行参数与环境变量'),
+              children: [
+                _buildFieldTile('显示名称', _nameCtrl),
+                _buildFieldTile(
+                  '监听端口',
+                  _portCtrl,
+                  keyboardType: TextInputType.number,
+                ),
+                _buildFieldTile('启动命令行参数', _argsCtrl),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '环境变量 (.env)',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: CupertinoColors.secondaryLabel
+                              .resolveFrom(context),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      CupertinoTextField(
+                        controller: _envCtrl,
+                        maxLines: 5,
+                        padding: const EdgeInsets.all(10),
+                        style: const TextStyle(
+                          fontFamily: 'Courier',
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 10),
-            _buildField('显示名称', _nameCtrl),
-            const SizedBox(height: 10),
-            _buildField(
-              '监听端口',
-              _portCtrl,
-              keyboardType: TextInputType.number,
-            ),
-            const SizedBox(height: 10),
-            _buildField('启动命令行参数', _argsCtrl),
-            const SizedBox(height: 14),
-            Text(
-              '环境变量 (.env)',
-              style: TextStyle(
-                fontSize: 13,
-                color: CupertinoColors.secondaryLabel.resolveFrom(context),
-              ),
-            ),
-            const SizedBox(height: 6),
-            CupertinoTextField(
-              controller: _envCtrl,
-              maxLines: 6,
-              padding: const EdgeInsets.all(12),
-              style: const TextStyle(fontFamily: 'Courier', fontSize: 13),
+            CupertinoListSection.insetGrouped(
+              children: [
+                CupertinoListTile(
+                  title: const Center(
+                    child: Text(
+                      '卸载此服务并清除数据',
+                      style: TextStyle(
+                        color: CupertinoColors.destructiveRed,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  onTap: _confirmUninstall,
+                ),
+              ],
             ),
             const SizedBox(height: 28),
-            CupertinoButton(
-              color: CupertinoColors.destructiveRed.withValues(alpha: 0.12),
-              onPressed: _confirmUninstall,
-              child: const Text(
-                '卸载此服务并清除目录',
-                style: TextStyle(
-                  color: CupertinoColors.destructiveRed,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildField(
+  Widget _buildFieldTile(
     String label,
     TextEditingController controller, {
     TextInputType keyboardType = TextInputType.text,
   }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 13,
-            color: CupertinoColors.secondaryLabel.resolveFrom(context),
-          ),
-        ),
-        const SizedBox(height: 4),
-        CupertinoTextField(
+    return CupertinoListTile(
+      title: Text(label),
+      trailing: SizedBox(
+        width: 170,
+        child: CupertinoTextField(
           controller: controller,
           keyboardType: keyboardType,
-          padding: const EdgeInsets.all(11),
+          textAlign: TextAlign.end,
+          decoration: null,
+          style: const TextStyle(fontSize: 14),
         ),
-      ],
+      ),
     );
   }
 }
