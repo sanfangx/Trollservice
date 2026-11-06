@@ -18,13 +18,16 @@ class DaemonController extends ChangeNotifier {
   final Set<String> _busyServiceIds = {};
 
   DaemonController({ServiceNativeBridge? bridge})
-      : bridge = bridge ?? const MethodChannelServiceBridge();
+      : bridge = bridge ?? MethodChannelServiceBridge();
 
   List<ServiceItem> get services => List.unmodifiable(_services);
   String get localIp => _localIp;
   bool get initialized => _initialized;
   String? get lastError => _lastError;
   String get serviceRootPath => bridge.serviceRootPath;
+
+  int _refreshIntervalSeconds = 2;
+  int get refreshIntervalSeconds => _refreshIntervalSeconds;
 
   int get runningCount =>
       _services.where((item) => item.status.isRunning).length;
@@ -35,6 +38,16 @@ class DaemonController extends ChangeNotifier {
 
   /// 初始化工作区、读取注册表并启动实时状态轮询
   Future<void> initialize({bool enablePolling = true}) async {
+    try {
+      final cfgFile = File('/var/mobile/Documents/.trollservice_root');
+      if (cfgFile.existsSync()) {
+        final savedRoot = cfgFile.readAsStringSync().trim();
+        if (savedRoot.isNotEmpty) {
+          await bridge.setServiceRootPath(savedRoot);
+        }
+      }
+    } catch (_) {}
+
     await bridge.initWorkspace();
     await _loadRegistry();
     _localIp = await bridge.getLocalIpAddress();
@@ -42,13 +55,67 @@ class DaemonController extends ChangeNotifier {
     _initialized = true;
     notifyListeners();
 
-    if (enablePolling) {
+    if (enablePolling && _refreshIntervalSeconds > 0) {
       _statusTimer?.cancel();
       _statusTimer = Timer.periodic(
-        const Duration(seconds: 2),
+        Duration(seconds: _refreshIntervalSeconds),
         (_) => refreshAllStatuses(),
       );
     }
+  }
+
+  void setRefreshInterval(int seconds) {
+    if (_refreshIntervalSeconds == seconds) return;
+    _refreshIntervalSeconds = seconds;
+    _statusTimer?.cancel();
+    if (seconds > 0) {
+      _statusTimer = Timer.periodic(
+        Duration(seconds: seconds),
+        (_) => refreshAllStatuses(),
+      );
+    }
+    notifyListeners();
+  }
+
+  /// 自定义修改服务安装根路径
+  Future<bool> setCustomServiceRootPath(String newPath) async {
+    final cleanPath = newPath.trim().replaceAll(RegExp(r'/+$'), '');
+    if (cleanPath.isEmpty) return false;
+
+    final ok = await bridge.setServiceRootPath(cleanPath);
+    if (!ok) return false;
+
+    await bridge.initWorkspace();
+    await _loadRegistry();
+    await refreshAllStatuses();
+    notifyListeners();
+    return true;
+  }
+
+  /// 一键停止所有正在运行的服务
+  Future<void> stopAllServices() async {
+    for (final s in _services) {
+      if (s.status.isRunning) {
+        await stopService(s.id);
+      }
+    }
+    await refreshAllStatuses();
+  }
+
+  /// 清理所有服务的运行日志
+  Future<int> clearAllLogs() async {
+    var count = 0;
+    for (final s in _services) {
+      final logFile = File(s.stdoutLogPath(serviceRootPath));
+      if (logFile.existsSync()) {
+        try {
+          logFile.writeAsStringSync('');
+          count++;
+        } catch (_) {}
+      }
+    }
+    notifyListeners();
+    return count;
   }
 
   @override
