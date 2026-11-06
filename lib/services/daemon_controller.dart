@@ -1,18 +1,21 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 
 import '../models/service_item.dart';
 import 'native_bridge.dart';
 
 /// 全局微服务控制器（管理 /var/mobile/Documents/service 下的所有程序生命周期）
-class DaemonController extends ChangeNotifier {
+class DaemonController extends ChangeNotifier with WidgetsBindingObserver {
   final ServiceNativeBridge bridge;
 
   List<ServiceItem> _services = [];
   String _localIp = '127.0.0.1';
   bool _initialized = false;
+  bool _pollingEnabled = false;
+  bool _isRefreshing = false;
+  bool _observerAttached = false;
   String? _lastError;
   Timer? _statusTimer;
   final Set<String> _busyServiceIds = {};
@@ -38,6 +41,7 @@ class DaemonController extends ChangeNotifier {
 
   /// 初始化工作区、读取注册表并启动实时状态轮询
   Future<void> initialize({bool enablePolling = true}) async {
+    _pollingEnabled = enablePolling;
     try {
       final cfgFile = File('/var/mobile/Documents/.trollservice_root');
       if (cfgFile.existsSync()) {
@@ -55,8 +59,20 @@ class DaemonController extends ChangeNotifier {
     _initialized = true;
     notifyListeners();
 
-    if (enablePolling && _refreshIntervalSeconds > 0) {
-      _statusTimer?.cancel();
+    if (!_observerAttached) {
+      try {
+        WidgetsBinding.instance.addObserver(this);
+        _observerAttached = true;
+      } catch (_) {}
+    }
+
+    _restartPollingTimerIfNeeded();
+  }
+
+  void _restartPollingTimerIfNeeded() {
+    _statusTimer?.cancel();
+    _statusTimer = null;
+    if (_pollingEnabled && _refreshIntervalSeconds > 0) {
       _statusTimer = Timer.periodic(
         Duration(seconds: _refreshIntervalSeconds),
         (_) => refreshAllStatuses(),
@@ -64,23 +80,32 @@ class DaemonController extends ChangeNotifier {
     }
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) {
+      _statusTimer?.cancel();
+      _statusTimer = null;
+    } else if (state == AppLifecycleState.resumed) {
+      if (_initialized) {
+        refreshAllStatuses();
+        _restartPollingTimerIfNeeded();
+      }
+    }
+  }
+
   void setRefreshInterval(int seconds) {
     if (_refreshIntervalSeconds == seconds) return;
     _refreshIntervalSeconds = seconds;
-    _statusTimer?.cancel();
-    if (seconds > 0) {
-      _statusTimer = Timer.periodic(
-        Duration(seconds: seconds),
-        (_) => refreshAllStatuses(),
-      );
-    }
+    _restartPollingTimerIfNeeded();
     notifyListeners();
   }
 
   /// 自定义修改服务安装根路径
   Future<bool> setCustomServiceRootPath(String newPath) async {
     final cleanPath = newPath.trim().replaceAll(RegExp(r'/+$'), '');
-    if (cleanPath.isEmpty) return false;
+    if (cleanPath.isEmpty || cleanPath.contains('..')) return false;
 
     final ok = await bridge.setServiceRootPath(cleanPath);
     if (!ok) return false;
@@ -94,7 +119,8 @@ class DaemonController extends ChangeNotifier {
 
   /// 一键停止所有正在运行的服务
   Future<void> stopAllServices() async {
-    for (final s in _services) {
+    final snapshot = List<ServiceItem>.from(_services);
+    for (final s in snapshot) {
       if (s.status.isRunning) {
         await stopService(s.id);
       }
@@ -121,6 +147,12 @@ class DaemonController extends ChangeNotifier {
   @override
   void dispose() {
     _statusTimer?.cancel();
+    if (_observerAttached) {
+      try {
+        WidgetsBinding.instance.removeObserver(this);
+      } catch (_) {}
+      _observerAttached = false;
+    }
     super.dispose();
   }
 
@@ -176,30 +208,48 @@ class DaemonController extends ChangeNotifier {
     }
   }
 
-  /// 刷新所有受管服务的进程状态与端口连通性
+  bool _hasStatusChanged(ServiceRuntimeStatus a, ServiceRuntimeStatus b) {
+    return a.isRunning != b.isRunning ||
+        a.isPortOpen != b.isPortOpen ||
+        a.pid != b.pid ||
+        a.memoryBytes != b.memoryBytes ||
+        a.uptimeSeconds != b.uptimeSeconds;
+  }
+
+  /// 刷新所有受管服务的进程状态与端口连通性（防重入 + 并行探测 + 原位按 ID 合并避免覆盖新修改）
   Future<void> refreshAllStatuses() async {
-    if (_services.isEmpty) return;
-    var changed = false;
-    final updatedList = <ServiceItem>[];
+    if (_services.isEmpty || _isRefreshing) return;
+    _isRefreshing = true;
 
-    for (final item in _services) {
-      final status = await bridge.getServiceStatus(
-        id: item.id,
-        port: item.port,
+    try {
+      final targets = _services
+          .map((item) => (id: item.id, port: item.port))
+          .toList(growable: false);
+
+      final results = await Future.wait(
+        targets.map((t) async {
+          final status = await bridge.getServiceStatus(id: t.id, port: t.port);
+          return MapEntry(t.id, status);
+        }),
       );
-      if (status.isRunning != item.status.isRunning ||
-          status.isPortOpen != item.status.isPortOpen ||
-          status.pid != item.status.pid ||
-          status.memoryBytes != item.status.memoryBytes ||
-          status.uptimeSeconds != item.status.uptimeSeconds) {
-        changed = true;
-      }
-      updatedList.add(item.copyWith(status: status));
-    }
 
-    _services = updatedList;
-    if (changed) {
-      notifyListeners();
+      final statusMap = Map<String, ServiceRuntimeStatus>.fromEntries(results);
+      var changed = false;
+
+      for (var i = 0; i < _services.length; i++) {
+        final current = _services[i];
+        final nextStatus = statusMap[current.id];
+        if (nextStatus != null && _hasStatusChanged(current.status, nextStatus)) {
+          _services[i] = current.copyWith(status: nextStatus);
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        notifyListeners();
+      }
+    } finally {
+      _isRefreshing = false;
     }
   }
 
@@ -241,6 +291,13 @@ class DaemonController extends ChangeNotifier {
     required String srcBinaryPath,
     String? customEntitlementsXml,
   }) async {
+    if (!ServiceItem.isValidIdentifier(item.id) ||
+        !ServiceItem.isValidIdentifier(item.binaryName)) {
+      _lastError = '服务标识或可执行文件名包含非法字符（仅允许字母、数字、下划线、连字符和点）';
+      notifyListeners();
+      return false;
+    }
+
     _busyServiceIds.add(item.id);
     _lastError = null;
     notifyListeners();
@@ -310,8 +367,12 @@ class DaemonController extends ChangeNotifier {
         return false;
       }
 
-      final updatedItem = current.copyWith(updatedAt: DateTime.now());
-      _services[index] = updatedItem;
+      final currentIdx = _services.indexWhere((s) => s.id == serviceId);
+      final updatedItem = (currentIdx >= 0 ? _services[currentIdx] : current)
+          .copyWith(updatedAt: DateTime.now());
+      if (currentIdx >= 0) {
+        _services[currentIdx] = updatedItem;
+      }
       await _saveRegistry();
 
       final helperReportedWasRunning = (res['was_running'] as bool?) ?? false;
@@ -428,7 +489,12 @@ class DaemonController extends ChangeNotifier {
     _busyServiceIds.add(serviceId);
     notifyListeners();
     try {
-      await bridge.uninstallService(serviceId);
+      final res = await bridge.uninstallService(serviceId);
+      final ok = (res['ok'] as bool?) ?? true;
+      if (!ok) {
+        _lastError = (res['error'] as String?) ?? '卸载服务失败';
+        return false;
+      }
       _services.removeWhere((s) => s.id == serviceId);
       await _saveRegistry();
       return true;
@@ -438,22 +504,44 @@ class DaemonController extends ChangeNotifier {
     }
   }
 
-  /// 读取服务运行日志
-  Future<String> readLogs(String serviceId, {int maxLines = 300}) async {
+  /// 读取服务运行日志（采用 RandomAccessFile 尾部流式读取 + 容错 UTF-8 解码，防止大日志 OOM 与非 UTF-8 字节崩溃）
+  Future<String> readLogs(
+    String serviceId, {
+    int maxLines = 300,
+    int maxBytes = 65536,
+  }) async {
     final index = _services.indexWhere((s) => s.id == serviceId);
     if (index < 0) return '';
     final logFile = File(_services[index].stdoutLogPath(serviceRootPath));
     if (!logFile.existsSync()) {
       return '暂无日志输出（日志文件: ${logFile.path}）';
     }
+    RandomAccessFile? raf;
     try {
-      final lines = await logFile.readAsLines();
+      raf = await logFile.open(mode: FileMode.read);
+      final length = await raf.length();
+      if (length <= 0) {
+        return '';
+      }
+      final startOffset = length > maxBytes ? length - maxBytes : 0;
+      await raf.setPosition(startOffset);
+      final bytes = await raf.read(length - startOffset);
+      final decoded = utf8.decode(bytes, allowMalformed: true);
+      var lines = const LineSplitter().convert(decoded);
+      if (startOffset > 0 && lines.length > 1) {
+        // 丢弃因按字节截断而可能不完整的首行
+        lines = lines.sublist(1);
+      }
       if (lines.length <= maxLines) {
         return lines.join('\n');
       }
       return lines.sublist(lines.length - maxLines).join('\n');
     } catch (e) {
       return '读取日志失败: $e';
+    } finally {
+      try {
+        await raf?.close();
+      } catch (_) {}
     }
   }
 

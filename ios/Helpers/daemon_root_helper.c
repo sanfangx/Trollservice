@@ -28,8 +28,66 @@
 #define ROOT_CONFIG_PATH "/var/mobile/Documents/.trollservice_root"
 #define MOBILE_UID 501
 #define MOBILE_GID 501
+#define MAX_LOG_FILE_BYTES (10 * 1024 * 1024) /* 10 MB 日志自动轮转阈值 */
+
+#ifndef PROC_PIDPATHINFO_MAXSIZE
+#define PROC_PIDPATHINFO_MAXSIZE (4 * PATH_MAX)
+#endif
+
+extern int proc_pidpath(int pid, void* buffer, uint32_t buffersize);
 
 static char g_service_root[PATH_MAX] = {0};
+
+/**
+ * 安全输出 JSON 转义字符串（防止换行符、双引号、反斜杠等破坏 JSON 格式）
+ */
+static void print_json_escaped(const char* str) {
+    if (!str) return;
+    for (const unsigned char* p = (const unsigned char*)str; *p; p++) {
+        switch (*p) {
+            case '"':  fputs("\\\"", stdout); break;
+            case '\\': fputs("\\\\", stdout); break;
+            case '\b': fputs("\\b", stdout); break;
+            case '\f': fputs("\\f", stdout); break;
+            case '\n': fputs("\\n", stdout); break;
+            case '\r': fputs("\\r", stdout); break;
+            case '\t': fputs("\\t", stdout); break;
+            default:
+                if (*p < 0x20) {
+                    printf("\\u%04x", (unsigned int)*p);
+                } else {
+                    putchar(*p);
+                }
+                break;
+        }
+    }
+}
+
+static void reply_json_error(const char* err_msg) {
+    fputs("{\"ok\":false,\"error\":\"", stdout);
+    print_json_escaped(err_msg ? err_msg : "未知错误");
+    fputs("\"}\n", stdout);
+    fflush(stdout);
+}
+
+/**
+ * 校验服务标识或可执行文件名是否安全（防止路径穿越 ../ 及 XML 注入）
+ */
+static bool is_safe_identifier(const char* name) {
+    if (!name || name[0] == '\0' || name[0] == '.') return false;
+    size_t len = strlen(name);
+    if (len > 64) return false;
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        bool ok = (c >= 'a' && c <= 'z') ||
+                  (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') ||
+                  c == '_' || c == '-' || c == '.';
+        if (!ok) return false;
+    }
+    if (strstr(name, "..") != NULL) return false;
+    return true;
+}
 
 /* 递归创建目录并赋予 mobile 权限 */
 static int mkdir_p(const char* path, mode_t mode) {
@@ -53,6 +111,7 @@ static int mkdir_p(const char* path, mode_t mode) {
     chown(tmp, MOBILE_UID, MOBILE_GID);
     return 0;
 }
+
 static const char* get_service_root(void) {
     if (g_service_root[0] != '\0') {
         return g_service_root;
@@ -86,7 +145,7 @@ static const char* get_service_root(void) {
 }
 
 static int set_service_root_internal(const char* new_root) {
-    if (!new_root || new_root[0] == '\0') {
+    if (!new_root || new_root[0] != '/' || strstr(new_root, "..") != NULL) {
         return -1;
     }
     if (mkdir_p(new_root, 0755) != 0) {
@@ -108,13 +167,17 @@ static int set_service_root_internal(const char* new_root) {
 static int cmd_set_root(const char* new_root) {
     int res = set_service_root_internal(new_root);
     if (res == -1) {
-        printf("{\"ok\":false,\"error\":\"无效路径\"}\n");
+        reply_json_error("无效路径（必须是以 / 开头的绝对路径且不含 ..）");
         return 1;
     } else if (res == -2) {
-        printf("{\"ok\":false,\"error\":\"无法创建目录: %s\"}\n", new_root);
+        char msg[PATH_MAX + 64];
+        snprintf(msg, sizeof(msg), "无法创建目录: %s", new_root ? new_root : "");
+        reply_json_error(msg);
         return 1;
     }
-    printf("{\"ok\":true,\"root\":\"%s\"}\n", new_root);
+    fputs("{\"ok\":true,\"root\":\"", stdout);
+    print_json_escaped(new_root);
+    fputs("\"}\n", stdout);
     return 0;
 }
 
@@ -189,11 +252,26 @@ static uint32_t swap_uint32(uint32_t val) {
            ((val << 24) & 0xFF000000);
 }
 
+/**
+ * 原子化安全复制文件：
+ * 先写入同目录临时文件并 fsync，随后 unlink 旧目标文件再 rename 替换。
+ * 强制分配全新 inode/vnode，彻底规避 iOS XNU 内核 UBC 代码签名缓存污染导致 SIGKILL (CODESIGNING)。
+ */
 static int copy_file_binary(const char* src, const char* dst) {
+    if (!src || !dst || strcmp(src, dst) == 0) return -1;
+
     int in_fd = open(src, O_RDONLY);
     if (in_fd < 0) return -1;
 
-    int out_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    char tmp_dst[PATH_MAX];
+    int n_tmp = snprintf(tmp_dst, sizeof(tmp_dst), "%s.tmp.%d", dst, (int)getpid());
+    if (n_tmp < 0 || (size_t)n_tmp >= sizeof(tmp_dst)) {
+        close(in_fd);
+        return -1;
+    }
+    unlink(tmp_dst);
+
+    int out_fd = open(tmp_dst, O_WRONLY | O_CREAT | O_EXCL | O_TRUNC, 0755);
     if (out_fd < 0) {
         close(in_fd);
         return -1;
@@ -209,6 +287,7 @@ static int copy_file_binary(const char* src, const char* dst) {
             if (written <= 0) {
                 close(in_fd);
                 close(out_fd);
+                unlink(tmp_dst);
                 return -1;
             }
             remaining -= written;
@@ -216,11 +295,24 @@ static int copy_file_binary(const char* src, const char* dst) {
         }
     }
 
+    if (n < 0) {
+        close(in_fd);
+        close(out_fd);
+        unlink(tmp_dst);
+        return -1;
+    }
+
     fsync(out_fd);
     close(in_fd);
     close(out_fd);
-    chown(dst, MOBILE_UID, MOBILE_GID);
-    chmod(dst, 0755);
+    chown(tmp_dst, MOBILE_UID, MOBILE_GID);
+    chmod(tmp_dst, 0755);
+
+    unlink(dst);
+    if (rename(tmp_dst, dst) != 0) {
+        unlink(tmp_dst);
+        return -1;
+    }
     return 0;
 }
 
@@ -288,6 +380,7 @@ static int get_helper_dir(char* out_dir, size_t size) {
  * 动态生成受管微服务的专属 Entitlements Plist（严格遵循 TrollStore 规则，不含任何 Banned Keys）
  */
 static int write_service_entitlements(const char* plist_path, const char* service_id) {
+    if (!is_safe_identifier(service_id)) return -1;
     FILE* fp = fopen(plist_path, "w");
     if (!fp) return -1;
 
@@ -408,13 +501,71 @@ static bool is_pid_alive(pid_t pid) {
     return (errno == EPERM);
 }
 
+/**
+ * 规范化 Darwin 路径（处理 iOS /private/var 与 /var 软链差异）
+ */
+static void normalize_darwin_path(const char* raw_path, char* out, size_t out_size) {
+    if (!raw_path || out_size == 0) {
+        if (out_size > 0) out[0] = '\0';
+        return;
+    }
+    char resolved[PATH_MAX];
+    const char* src = raw_path;
+    if (realpath(raw_path, resolved) != NULL) {
+        src = resolved;
+    }
+    if (strncmp(src, "/private/var/", 13) == 0) {
+        src += 8;
+    } else if (strncmp(src, "/private/tmp/", 13) == 0) {
+        src += 8;
+    }
+    snprintf(out, out_size, "%s", src);
+}
+
+/**
+ * 精确校验指定 PID 是否存活且属于当前服务的受管进程（防范 PID 复用误判与误杀）
+ */
+static bool is_service_pid_alive(pid_t pid, const char* service_id) {
+    if (!is_pid_alive(pid) || !is_safe_identifier(service_id)) {
+        return false;
+    }
+    char proc_path[PROC_PIDPATHINFO_MAXSIZE];
+    memset(proc_path, 0, sizeof(proc_path));
+    if (proc_pidpath((int)pid, proc_path, sizeof(proc_path)) <= 0) {
+        return false;
+    }
+
+    char raw_bin_dir[PATH_MAX];
+    char norm_bin_dir[PATH_MAX];
+    char norm_proc_path[PATH_MAX];
+    snprintf(raw_bin_dir, sizeof(raw_bin_dir), "%s/%s/bin", get_service_root(), service_id);
+    normalize_darwin_path(raw_bin_dir, norm_bin_dir, sizeof(norm_bin_dir));
+    normalize_darwin_path(proc_path, norm_proc_path, sizeof(norm_proc_path));
+
+    size_t dir_len = strlen(norm_bin_dir);
+    if (dir_len == 0) return false;
+    return (strncmp(norm_proc_path, norm_bin_dir, dir_len) == 0 &&
+            norm_proc_path[dir_len] == '/');
+}
+
 static void elevate_jetsam_limits(pid_t pid) {
     memorystatus_control(MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT, (int32_t)pid, 0, NULL, 0);
     memorystatus_control(MEMORYSTATUS_CMD_SET_JETSAM_HIGH_WATER_MARK, (int32_t)pid, (uint32_t)-1, NULL, 0);
 }
 
-static void kill_processes_by_comm_prefix(const char* prefix, int sig) {
-    if (!prefix || prefix[0] == '\0') return;
+/**
+ * 按服务专属 bin 目录精确匹配并清理残留进程（绝不误杀系统守护进程或其他服务）
+ */
+static void kill_service_processes_by_bin_dir(const char* service_id, int sig) {
+    if (!is_safe_identifier(service_id)) return;
+
+    char raw_bin_dir[PATH_MAX];
+    char norm_bin_dir[PATH_MAX];
+    snprintf(raw_bin_dir, sizeof(raw_bin_dir), "%s/%s/bin", get_service_root(), service_id);
+    normalize_darwin_path(raw_bin_dir, norm_bin_dir, sizeof(norm_bin_dir));
+    size_t dir_len = strlen(norm_bin_dir);
+    if (dir_len == 0) return;
+
     int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL };
     size_t buf_size = 0;
     if (sysctl(mib, 3, NULL, &buf_size, NULL, 0) != 0 || buf_size == 0) return;
@@ -426,13 +577,18 @@ static void kill_processes_by_comm_prefix(const char* prefix, int sig) {
     if (sysctl(mib, 3, procs, &alloc_size, NULL, 0) == 0) {
         size_t count = alloc_size / sizeof(struct kinfo_proc);
         pid_t self_pid = getpid();
-        size_t cmp_len = strlen(prefix);
-        if (cmp_len > 15) cmp_len = 15; /* MAXCOMLEN is 16 including NUL */
         for (size_t i = 0; i < count; i++) {
             pid_t p = procs[i].kp_proc.p_pid;
             if (p <= 1 || p == self_pid) continue;
-            if (strncmp(procs[i].kp_proc.p_comm, prefix, cmp_len) == 0) {
-                kill(p, sig);
+            char proc_path[PROC_PIDPATHINFO_MAXSIZE];
+            memset(proc_path, 0, sizeof(proc_path));
+            if (proc_pidpath((int)p, proc_path, sizeof(proc_path)) > 0) {
+                char norm_proc[PATH_MAX];
+                normalize_darwin_path(proc_path, norm_proc, sizeof(norm_proc));
+                if (strncmp(norm_proc, norm_bin_dir, dir_len) == 0 &&
+                    norm_proc[dir_len] == '/') {
+                    kill(p, sig);
+                }
             }
         }
     }
@@ -440,38 +596,45 @@ static void kill_processes_by_comm_prefix(const char* prefix, int sig) {
 }
 
 static int stop_service_internal(const char* service_id) {
+    if (!is_safe_identifier(service_id)) return -1;
+
     char sup_pid_path[PATH_MAX];
     char svc_pid_path[PATH_MAX];
     snprintf(sup_pid_path, sizeof(sup_pid_path), "%s/%s/runtime/supervisor.pid", get_service_root(), service_id);
     snprintf(svc_pid_path, sizeof(svc_pid_path), "%s/%s/runtime/service.pid", get_service_root(), service_id);
 
-    /* 清理旧版可能遗留的 supervisor 进程 */
-    pid_t sup_pid = read_pid_file(sup_pid_path);
-    if (is_pid_alive(sup_pid)) {
-        kill(sup_pid, SIGKILL);
-    }
-    kill_processes_by_comm_prefix("daemon_root_hel", SIGKILL);
-
     pid_t svc_pid = read_pid_file(svc_pid_path);
-    if (is_pid_alive(svc_pid)) {
+    if (is_service_pid_alive(svc_pid, service_id)) {
         kill(svc_pid, SIGTERM);
         for (int i = 0; i < 20; i++) {
-            if (!is_pid_alive(svc_pid)) break;
+            if (!is_service_pid_alive(svc_pid, service_id)) break;
             usleep(100000); /* 100ms * 20 = 2s */
         }
-        if (is_pid_alive(svc_pid)) {
+        if (is_service_pid_alive(svc_pid, service_id)) {
             kill(svc_pid, SIGKILL);
         }
     }
 
-    /* 兜底：若 .pid 文件已被删除但同名进程仍在内存中运行，按进程名清理 */
-    kill_processes_by_comm_prefix(service_id, SIGTERM);
+    /* 兜底：若 .pid 文件已被删除但该服务 bin/ 下的进程仍在运行，按精确二进制路径清理 */
+    kill_service_processes_by_bin_dir(service_id, SIGTERM);
     usleep(100000);
-    kill_processes_by_comm_prefix(service_id, SIGKILL);
+    kill_service_processes_by_bin_dir(service_id, SIGKILL);
 
     unlink(sup_pid_path);
     unlink(svc_pid_path);
     return 0;
+}
+
+static void rotate_log_if_needed(const char* log_path) {
+    if (!log_path || log_path[0] == '\0') return;
+    struct stat st;
+    if (stat(log_path, &st) == 0 && st.st_size > MAX_LOG_FILE_BYTES) {
+        char old_log_path[PATH_MAX];
+        snprintf(old_log_path, sizeof(old_log_path), "%s.1", log_path);
+        unlink(old_log_path);
+        rename(log_path, old_log_path);
+        chown(old_log_path, MOBILE_UID, MOBILE_GID);
+    }
 }
 
 static void load_dotenv_into_environ(const char* env_file_path) {
@@ -516,24 +679,29 @@ static void load_dotenv_into_environ(const char* env_file_path) {
 }
 
 static int cmd_init_workspace(const char* custom_root) {
-    /* 自动清理旧版可能遗留在后台的 supervise 循环进程 */
-    kill_processes_by_comm_prefix("daemon_root_hel", SIGKILL);
-
     if (custom_root && custom_root[0] != '\0') {
         set_service_root_internal(custom_root);
     }
     const char* root = get_service_root();
     if (mkdir_p(root, 0755) != 0) {
-        printf("{\"ok\":false,\"error\":\"创建 %s 失败\"}\n", root);
+        char msg[PATH_MAX + 64];
+        snprintf(msg, sizeof(msg), "创建 %s 失败", root);
+        reply_json_error(msg);
         return 1;
     }
-    printf("{\"ok\":true,\"root\":\"%s\"}\n", root);
+    fputs("{\"ok\":true,\"root\":\"", stdout);
+    print_json_escaped(root);
+    fputs("\"}\n", stdout);
     return 0;
 }
 
 static int cmd_install(const char* service_id, const char* src_path, const char* binary_name, const char* custom_ents_path) {
+    if (!is_safe_identifier(service_id) || !is_safe_identifier(binary_name)) {
+        reply_json_error("服务标识或可执行文件名包含非法字符（仅允许字母、数字、下划线、连字符和点）");
+        return 1;
+    }
     if (!validate_macho_arm64(src_path)) {
-        printf("{\"ok\":false,\"error\":\"文件不是有效的 iOS/Darwin ARM64 Mach-O 可执行文件\"}\n");
+        reply_json_error("文件不是有效的 iOS/Darwin ARM64 Mach-O 可执行文件");
         return 1;
     }
 
@@ -556,31 +724,35 @@ static int cmd_install(const char* service_id, const char* src_path, const char*
     snprintf(ents_plist, sizeof(ents_plist), "%s/entitlements.plist", cfg_dir);
 
     if (copy_file_binary(src_path, dst_bin) != 0) {
-        printf("{\"ok\":false,\"error\":\"复制程序文件到 %s 失败\"}\n", dst_bin);
+        char msg[PATH_MAX + 64];
+        snprintf(msg, sizeof(msg), "复制程序文件到 %s 失败", dst_bin);
+        reply_json_error(msg);
         return 1;
     }
 
     if (custom_ents_path && custom_ents_path[0] != '\0' && access(custom_ents_path, R_OK) == 0) {
         if (copy_file_binary(custom_ents_path, ents_plist) != 0) {
-            printf("{\"ok\":false,\"error\":\"应用自定义 entitlements.plist 失败\"}\n");
+            reply_json_error("应用自定义 entitlements.plist 失败");
             return 1;
         }
         chown(ents_plist, MOBILE_UID, MOBILE_GID);
         chmod(ents_plist, 0644);
     } else {
         if (write_service_entitlements(ents_plist, service_id) != 0) {
-            printf("{\"ok\":false,\"error\":\"生成 entitlements.plist 失败\"}\n");
+            reply_json_error("生成 entitlements.plist 失败");
             return 1;
         }
     }
 
-    char err_msg[512] = {0};
+    char err_msg[1024] = {0};
     if (sign_and_entitle_binary(ents_plist, dst_bin, err_msg, sizeof(err_msg)) != 0) {
-        printf("{\"ok\":false,\"error\":\"%s\"}\n", err_msg);
+        reply_json_error(err_msg);
         return 1;
     }
 
-    printf("{\"ok\":true,\"action\":\"install\",\"binary\":\"%s\"}\n", dst_bin);
+    fputs("{\"ok\":true,\"action\":\"install\",\"binary\":\"", stdout);
+    print_json_escaped(dst_bin);
+    fputs("\"}\n", stdout);
     return 0;
 }
 
@@ -588,13 +760,17 @@ static int cmd_install(const char* service_id, const char* src_path, const char*
  * 更新程序命令：
  * 1. 先校验新文件架构合法性（不合法直接中止，绝不破坏原程序）
  * 2. 若服务正在运行，先优雅停止进程释放文件锁与数据库锁
- * 3. 仅覆盖 bin/<binary_name> 并重新执行 ldid -S + fastPathSign 签名赋权
+ * 3. 仅原子替换 bin/<binary_name> 并重新执行 ldid -S + fastPathSign 签名赋权
  * 4. 100% 原样保留服务目录下的 config/, runtime/, accounts/, 数据库等全部数据
  * 5. 支持传入自定义 entitlements.plist
  */
 static int cmd_update(const char* service_id, const char* new_src_path, const char* binary_name, const char* custom_ents_path) {
+    if (!is_safe_identifier(service_id) || !is_safe_identifier(binary_name)) {
+        reply_json_error("服务标识或可执行文件名包含非法字符");
+        return 1;
+    }
     if (!validate_macho_arm64(new_src_path)) {
-        printf("{\"ok\":false,\"error\":\"新文件不是有效的 iOS/Darwin ARM64 Mach-O 可执行文件，已中止更新，原程序与数据未受影响\"}\n");
+        reply_json_error("新文件不是有效的 iOS/Darwin ARM64 Mach-O 可执行文件，已中止更新，原程序与数据未受影响");
         return 1;
     }
 
@@ -614,7 +790,7 @@ static int cmd_update(const char* service_id, const char* new_src_path, const ch
     char svc_pid_path[PATH_MAX];
     snprintf(svc_pid_path, sizeof(svc_pid_path), "%s/service.pid", run_dir);
     pid_t old_pid = read_pid_file(svc_pid_path);
-    bool was_running = is_pid_alive(old_pid);
+    bool was_running = is_service_pid_alive(old_pid, service_id);
 
     if (was_running) {
         stop_service_internal(service_id);
@@ -627,7 +803,7 @@ static int cmd_update(const char* service_id, const char* new_src_path, const ch
 
     if (custom_ents_path && custom_ents_path[0] != '\0' && access(custom_ents_path, R_OK) == 0) {
         if (copy_file_binary(custom_ents_path, ents_plist) != 0) {
-            printf("{\"ok\":false,\"error\":\"应用自定义 entitlements.plist 失败\"}\n");
+            reply_json_error("应用自定义 entitlements.plist 失败");
             return 1;
         }
         chown(ents_plist, MOBILE_UID, MOBILE_GID);
@@ -640,28 +816,36 @@ static int cmd_update(const char* service_id, const char* new_src_path, const ch
     }
 
     if (copy_file_binary(new_src_path, dst_bin) != 0) {
-        printf("{\"ok\":false,\"error\":\"替换可执行文件 %s 失败\"}\n", dst_bin);
+        char msg[PATH_MAX + 64];
+        snprintf(msg, sizeof(msg), "替换可执行文件 %s 失败", dst_bin);
+        reply_json_error(msg);
         return 1;
     }
 
-    char err_msg[512] = {0};
+    char err_msg[1024] = {0};
     if (sign_and_entitle_binary(ents_plist, dst_bin, err_msg, sizeof(err_msg)) != 0) {
-        printf("{\"ok\":false,\"error\":\"%s\"}\n", err_msg);
+        reply_json_error(err_msg);
         return 1;
     }
 
-    printf("{\"ok\":true,\"action\":\"update\",\"was_running\":%s,\"preserved_data\":true,\"binary\":\"%s\"}\n",
-           was_running ? "true" : "false", dst_bin);
+    printf("{\"ok\":true,\"action\":\"update\",\"was_running\":%s,\"preserved_data\":true,\"binary\":\"",
+           was_running ? "true" : "false");
+    print_json_escaped(dst_bin);
+    fputs("\"}\n", stdout);
     return 0;
 }
 
 static int cmd_start(int argc, char* argv[]) {
     if (argc < 4) {
-        printf("{\"ok\":false,\"error\":\"参数不足\"}\n");
+        reply_json_error("参数不足");
         return 1;
     }
     const char* service_id = argv[2];
     const char* binary_name = argv[3];
+    if (!is_safe_identifier(service_id) || !is_safe_identifier(binary_name)) {
+        reply_json_error("服务标识或可执行文件名包含非法字符");
+        return 1;
+    }
 
     char base_dir[PATH_MAX];
     char bin_path[PATH_MAX];
@@ -678,13 +862,17 @@ static int cmd_start(int argc, char* argv[]) {
     snprintf(svc_pid_path, sizeof(svc_pid_path), "%s/runtime/service.pid", base_dir);
 
     pid_t existing_pid = read_pid_file(svc_pid_path);
-    if (is_pid_alive(existing_pid)) {
+    if (is_service_pid_alive(existing_pid, service_id)) {
         printf("{\"ok\":true,\"already_running\":true,\"pid\":%d}\n", (int)existing_pid);
         return 0;
+    } else if (existing_pid > 0) {
+        unlink(svc_pid_path);
     }
 
     if (chdir(base_dir) != 0) {
-        printf("{\"ok\":false,\"error\":\"无法进入服务目录 %s\"}\n", base_dir);
+        char msg[PATH_MAX + 64];
+        snprintf(msg, sizeof(msg), "无法进入服务目录 %s", base_dir);
+        reply_json_error(msg);
         return 1;
     }
 
@@ -701,12 +889,17 @@ static int cmd_start(int argc, char* argv[]) {
 
     int extra_args = argc - 4;
     char** child_argv = (char**)calloc((size_t)(extra_args + 2), sizeof(char*));
+    if (!child_argv) {
+        reply_json_error("分配参数内存失败");
+        return 1;
+    }
     child_argv[0] = (char*)bin_path;
     for (int i = 0; i < extra_args; i++) {
         child_argv[i + 1] = argv[4 + i];
     }
     child_argv[extra_args + 1] = NULL;
 
+    rotate_log_if_needed(log_path);
     int log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
     chown(log_path, MOBILE_UID, MOBILE_GID);
 
@@ -734,7 +927,9 @@ static int cmd_start(int argc, char* argv[]) {
     free(child_argv);
 
     if (spawn_err != 0) {
-        printf("{\"ok\":false,\"error\":\"启动进程失败 (errno=%d)\"}\n", spawn_err);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "启动进程失败 (errno=%d)", spawn_err);
+        reply_json_error(msg);
         return 1;
     }
 
@@ -747,7 +942,7 @@ static int cmd_start(int argc, char* argv[]) {
     pid_t w = waitpid(child_pid, &status, WNOHANG);
     if (w == child_pid || !is_pid_alive(child_pid)) {
         unlink(svc_pid_path);
-        printf("{\"ok\":false,\"error\":\"程序启动后立即退出，请打开实时日志查看报错原因\"}\n");
+        reply_json_error("程序启动后立即退出，请打开实时日志查看报错原因");
         return 1;
     }
 
@@ -756,11 +951,18 @@ static int cmd_start(int argc, char* argv[]) {
 }
 
 static int cmd_status(const char* service_id) {
+    if (!is_safe_identifier(service_id)) {
+        reply_json_error("非法服务标识");
+        return 1;
+    }
     char svc_pid_path[PATH_MAX];
     snprintf(svc_pid_path, sizeof(svc_pid_path), "%s/%s/runtime/service.pid", get_service_root(), service_id);
     pid_t pid = read_pid_file(svc_pid_path);
 
-    if (!is_pid_alive(pid)) {
+    if (!is_service_pid_alive(pid, service_id)) {
+        if (pid > 0) {
+            unlink(svc_pid_path);
+        }
         printf("{\"ok\":true,\"running\":false,\"pid\":0,\"memory_bytes\":0,\"uptime_sec\":0}\n");
         return 0;
     }
@@ -814,6 +1016,10 @@ static int remove_directory_recursive(const char* path) {
 }
 
 static int cmd_uninstall(const char* service_id) {
+    if (!is_safe_identifier(service_id)) {
+        reply_json_error("非法服务标识，拒绝卸载清理");
+        return 1;
+    }
     stop_service_internal(service_id);
     char base_dir[PATH_MAX];
     snprintf(base_dir, sizeof(base_dir), "%s/%s", get_service_root(), service_id);
@@ -824,7 +1030,7 @@ static int cmd_uninstall(const char* service_id) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        printf("{\"ok\":false,\"error\":\"用法: daemon_root_helper <init-workspace|set-root|install|update|start|stop|status|uninstall>\"}\n");
+        reply_json_error("用法: daemon_root_helper <init-workspace|set-root|install|update|start|stop|status|uninstall>");
         return 1;
     }
 
@@ -843,6 +1049,10 @@ int main(int argc, char* argv[]) {
     } else if (strcmp(cmd, "start") == 0) {
         return cmd_start(argc, argv);
     } else if (strcmp(cmd, "stop") == 0 && argc >= 3) {
+        if (!is_safe_identifier(argv[2])) {
+            reply_json_error("非法服务标识");
+            return 1;
+        }
         stop_service_internal(argv[2]);
         printf("{\"ok\":true,\"action\":\"stop\"}\n");
         return 0;
@@ -852,6 +1062,8 @@ int main(int argc, char* argv[]) {
         return cmd_uninstall(argv[2]);
     }
 
-    printf("{\"ok\":false,\"error\":\"未知命令或参数不足: %s\"}\n", cmd);
+    char msg[256];
+    snprintf(msg, sizeof(msg), "未知命令或参数不足: %s", cmd);
+    reply_json_error(msg);
     return 1;
 }

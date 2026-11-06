@@ -74,13 +74,22 @@ class MethodChannelServiceBridge implements ServiceNativeBridge {
 
   @override
   Future<bool> setServiceRootPath(String path) async {
-    _serviceRootPath = path;
+    if (path.trim().isEmpty || path.contains('..')) {
+      return false;
+    }
     try {
       final res = await _channel.invokeMethod<Object?>('setServiceRoot', {'root': path});
       final map = _normalizeMap(res);
-      return (map['ok'] as bool?) ?? false;
-    } catch (_) {
+      final ok = (map['ok'] as bool?) ?? false;
+      if (ok) {
+        _serviceRootPath = path;
+      }
+      return ok;
+    } on MissingPluginException {
+      _serviceRootPath = path;
       return true;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -94,7 +103,10 @@ class MethodChannelServiceBridge implements ServiceNativeBridge {
   @override
   Future<Map<String, dynamic>> initWorkspace() async {
     try {
-      final res = await _channel.invokeMethod<Object?>('initWorkspace');
+      final res = await _channel.invokeMethod<Object?>(
+        'initWorkspace',
+        {'root': _serviceRootPath},
+      );
       return _normalizeMap(res);
     } on PlatformException catch (e) {
       return {'ok': false, 'error': e.message ?? e.code};
@@ -288,12 +300,19 @@ class FileSystemMockServiceBridge implements ServiceNativeBridge {
 
   @override
   Future<bool> setServiceRootPath(String path) async {
-    _serviceRootPath = path;
-    final dir = Directory(path);
-    if (!dir.existsSync()) {
-      dir.createSync(recursive: true);
+    if (path.trim().isEmpty || path.contains('..')) {
+      return false;
     }
-    return true;
+    try {
+      final dir = Directory(path);
+      if (!dir.existsSync()) {
+        dir.createSync(recursive: true);
+      }
+      _serviceRootPath = path;
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   @override
@@ -312,6 +331,10 @@ class FileSystemMockServiceBridge implements ServiceNativeBridge {
     required String binaryName,
     String? customEntitlementsXml,
   }) async {
+    if (!ServiceItem.isValidIdentifier(id) ||
+        !ServiceItem.isValidIdentifier(binaryName)) {
+      return {'ok': false, 'error': '服务标识或可执行文件名包含非法字符'};
+    }
     final srcFile = File(srcPath);
     if (!srcFile.existsSync()) {
       return {'ok': false, 'error': '源二进制文件不存在: $srcPath'};
@@ -326,6 +349,9 @@ class FileSystemMockServiceBridge implements ServiceNativeBridge {
     runDir.createSync(recursive: true);
 
     final dstBin = File('${binDir.path}/$binaryName');
+    if (dstBin.existsSync() && srcFile.path != dstBin.path) {
+      dstBin.deleteSync();
+    }
     srcFile.copySync(dstBin.path);
 
     final entsFile = File('${cfgDir.path}/entitlements.plist');
@@ -348,6 +374,10 @@ class FileSystemMockServiceBridge implements ServiceNativeBridge {
     required String binaryName,
     String? customEntitlementsXml,
   }) async {
+    if (!ServiceItem.isValidIdentifier(id) ||
+        !ServiceItem.isValidIdentifier(binaryName)) {
+      return {'ok': false, 'error': '服务标识或可执行文件名包含非法字符'};
+    }
     final srcFile = File(srcPath);
     if (!srcFile.existsSync()) {
       return {'ok': false, 'error': '新二进制文件不存在: $srcPath'};
@@ -366,8 +396,11 @@ class FileSystemMockServiceBridge implements ServiceNativeBridge {
     cfgDir.createSync(recursive: true);
     runDir.createSync(recursive: true);
 
-    /* 仅覆盖替换 bin/<binaryName>，绝不删除或清空 config/, runtime/ 或其他数据子目录 */
+    /* 先删除旧可执行文件分配新 inode/vnode，再仅覆盖替换 bin/<binaryName>，绝不删除或清空 config/, runtime/ 或其他数据子目录 */
     final dstBin = File('${binDir.path}/$binaryName');
+    if (dstBin.existsSync() && srcFile.path != dstBin.path) {
+      dstBin.deleteSync();
+    }
     srcFile.copySync(dstBin.path);
 
     final entsFile = File('${cfgDir.path}/entitlements.plist');
@@ -456,6 +489,9 @@ class FileSystemMockServiceBridge implements ServiceNativeBridge {
 
   @override
   Future<Map<String, dynamic>> uninstallService(String id) async {
+    if (!ServiceItem.isValidIdentifier(id)) {
+      return {'ok': false, 'error': '非法服务标识，拒绝卸载清理'};
+    }
     await stopService(id);
     final dir = Directory('$serviceRootPath/$id');
     if (dir.existsSync()) {

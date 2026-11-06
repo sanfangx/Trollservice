@@ -86,6 +86,8 @@ int main(int argc, char *argv[]) {
         return r;
     }
 
+    /* 先显式 unlink 目标文件，确保分配全新 inode/vnode，防止 XNU UBC 代码签名缓存冲突 */
+    unlink(input);
     if (copyfile(machoPath, input, 0, COPYFILE_ALL | COPYFILE_MOVE | COPYFILE_UNLINK) == 0) {
         chmod(input, 0755);
         printf("Applied CoreTrust Bypass to target service binary: %s\n", input);

@@ -38,7 +38,7 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
     final s = widget.service;
     _nameCtrl = TextEditingController(text: s.name);
     _portCtrl = TextEditingController(text: s.port.toString());
-    _argsCtrl = TextEditingController(text: s.args.join(' '));
+    _argsCtrl = TextEditingController(text: ServiceItem.formatArgs(s.args));
     _envCtrl = TextEditingController(
       text: s.envVars.entries.map((e) => '${e.key}=${e.value}').join('\n'),
     );
@@ -139,21 +139,25 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
     }
   }
 
+  ServiceItem get _currentService {
+    for (final s in widget.controller.services) {
+      if (s.id == widget.service.id) return s;
+    }
+    return widget.service;
+  }
+
   Future<void> _handleSaveConfig() async {
     setState(() => _savingConfig = true);
     HapticFeedback.lightImpact();
 
-    final port = int.tryParse(_portCtrl.text.trim()) ?? widget.service.port;
-    final args = _argsCtrl.text
-        .trim()
-        .split(RegExp(r'\s+'))
-        .where((s) => s.isNotEmpty)
-        .toList();
+    final current = _currentService;
+    final port = int.tryParse(_portCtrl.text.trim()) ?? current.port;
+    final args = ServiceItem.parseArgs(_argsCtrl.text);
     final envMap = ServiceItem.parseDotEnv(_envCtrl.text);
 
-    final updated = widget.service.copyWith(
+    final updated = current.copyWith(
       name: _nameCtrl.text.trim().isEmpty
-          ? widget.service.name
+          ? current.name
           : _nameCtrl.text.trim(),
       port: port,
       args: args,
@@ -223,46 +227,50 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final root = widget.controller.serviceRootPath;
-    final dataDir = widget.service.serviceDir(root);
-    final status = widget.service.status;
+    return ListenableBuilder(
+      listenable: widget.controller,
+      builder: (context, _) {
+        final current = _currentService;
+        final root = widget.controller.serviceRootPath;
+        final dataDir = current.serviceDir(root);
+        final status = current.status;
 
-    return CupertinoPageScaffold(
-      backgroundColor:
-          CupertinoColors.systemGroupedBackground.resolveFrom(context),
-      navigationBar: CupertinoNavigationBar(
-        middle: Text(widget.service.name),
-        trailing: _savingConfig
-            ? const CupertinoActivityIndicator()
-            : CupertinoButton(
-                padding: EdgeInsets.zero,
-                onPressed: _handleSaveConfig,
-                child: const Text(
-                  '保存',
-                  style: TextStyle(fontWeight: FontWeight.w600),
-                ),
-              ),
-      ),
-      child: SafeArea(
-        child: ListView(
-          physics: const BouncingScrollPhysics(
-            parent: AlwaysScrollableScrollPhysics(),
-          ),
-          children: [
-            CupertinoListSection.insetGrouped(
-              header: const Text('服务信息'),
-              children: [
-                CupertinoListTile(
-                  title: const Text('运行状态'),
-                  additionalInfo: Text(
-                    status.isRunning ? '正在运行 (PID: ${status.pid})' : '已停止',
-                    style: TextStyle(
-                      color: status.isRunning
-                          ? CupertinoColors.activeGreen
-                          : CupertinoColors.secondaryLabel,
+        return CupertinoPageScaffold(
+          backgroundColor:
+              CupertinoColors.systemGroupedBackground.resolveFrom(context),
+          navigationBar: CupertinoNavigationBar(
+            middle: Text(current.name),
+            trailing: _savingConfig
+                ? const CupertinoActivityIndicator()
+                : CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    onPressed: _handleSaveConfig,
+                    child: const Text(
+                      '保存',
+                      style: TextStyle(fontWeight: FontWeight.w600),
                     ),
                   ),
-                ),
+          ),
+          child: SafeArea(
+            child: ListView(
+              physics: const BouncingScrollPhysics(
+                parent: AlwaysScrollableScrollPhysics(),
+              ),
+              children: [
+                CupertinoListSection.insetGrouped(
+                  header: const Text('服务信息'),
+                  children: [
+                    CupertinoListTile(
+                      title: const Text('运行状态'),
+                      additionalInfo: Text(
+                        status.isRunning ? '正在运行 (PID: ${status.pid})' : '已停止',
+                        style: TextStyle(
+                          color: status.isRunning
+                              ? CupertinoColors.activeGreen
+                              : CupertinoColors.secondaryLabel,
+                        ),
+                      ),
+                    ),
                 CupertinoListTile(
                   title: const Text('工作目录'),
                   subtitle: Text(
@@ -445,10 +453,12 @@ class _ServiceDetailScreenState extends State<ServiceDetailScreen> {
                 ),
               ],
             ),
-            const SizedBox(height: 28),
-          ],
-        ),
-      ),
+                const SizedBox(height: 28),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 

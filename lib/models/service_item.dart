@@ -277,14 +277,96 @@ class ServiceItem {
     return result;
   }
 
+  static final RegExp _validIdRegex =
+      RegExp(r'^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$');
+
+  /// 校验服务标识或可执行文件名是否安全（防范路径穿越 ../ 与 XML 注入）
+  static bool isValidIdentifier(String value) {
+    final trimmed = value.trim();
+    return _validIdRegex.hasMatch(trimmed) && !trimmed.contains('..');
+  }
+
+  /// 解析命令行参数字符串（支持单引号、双引号与反斜杠转义，正确处理带空格路径）
+  static List<String> parseArgs(String raw) {
+    final input = raw.trim();
+    if (input.isEmpty) return [];
+    final args = <String>[];
+    final current = StringBuffer();
+    var inSingleQuote = false;
+    var inDoubleQuote = false;
+    var escaped = false;
+    var hasToken = false;
+
+    for (var i = 0; i < input.length; i++) {
+      final ch = input[i];
+      if (escaped) {
+        current.write(ch);
+        escaped = false;
+        hasToken = true;
+        continue;
+      }
+      if (ch == r'\' && !inSingleQuote) {
+        escaped = true;
+        hasToken = true;
+        continue;
+      }
+      if (ch == "'" && !inDoubleQuote) {
+        inSingleQuote = !inSingleQuote;
+        hasToken = true;
+        continue;
+      }
+      if (ch == '"' && !inSingleQuote) {
+        inDoubleQuote = !inDoubleQuote;
+        hasToken = true;
+        continue;
+      }
+      if (!inSingleQuote && !inDoubleQuote && RegExp(r'\s').hasMatch(ch)) {
+        if (hasToken) {
+          args.add(current.toString());
+          current.clear();
+          hasToken = false;
+        }
+        continue;
+      }
+      current.write(ch);
+      hasToken = true;
+    }
+    if (hasToken) {
+      args.add(current.toString());
+    }
+    return args;
+  }
+
+  /// 将参数列表格式化为可编辑的命令行字符串（自动为含空格或引号的参数添加引号）
+  static String formatArgs(List<String> args) {
+    return args.map((arg) {
+      if (arg.isEmpty) return '""';
+      if (RegExp(r'[\s"\\]').hasMatch(arg) || arg.contains("'")) {
+        final escaped = arg.replaceAll(r'\', r'\\').replaceAll('"', r'\"');
+        return '"$escaped"';
+      }
+      return arg;
+    }).join(' ');
+  }
+
+  static String _escapeXml(String input) {
+    return input
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&apos;');
+  }
+
   /// 生成受管微服务的专属 Entitlements Plist（严格遵循 TrollStore 规则，不含任何 Banned Keys）
   static String generateServiceEntitlementsXml(String serviceId) {
+    final safeId = _escapeXml(serviceId.trim());
     return '''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 \t<key>application-identifier</key>
-\t<string>com.magicfall.trollservice.svc.$serviceId</string>
+\t<string>com.magicfall.trollservice.svc.$safeId</string>
 \t<key>com.apple.developer.team-identifier</key>
 \t<string>TROLLSTORE</string>
 \t<key>platform-application</key>

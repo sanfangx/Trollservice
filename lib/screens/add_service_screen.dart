@@ -65,7 +65,7 @@ class _AddServiceScreenState extends State<AddServiceScreen> {
       _nameCtrl.text = preset.title;
       _binaryNameCtrl.text = preset.defaultBinaryName;
       _portCtrl.text = preset.defaultPort.toString();
-      _argsCtrl.text = preset.defaultArgs.join(' ');
+      _argsCtrl.text = ServiceItem.formatArgs(preset.defaultArgs);
       _envCtrl.text = preset.defaultEnv.entries
           .map((e) => '${e.key}=${e.value}')
           .join('\n');
@@ -122,14 +122,16 @@ class _AddServiceScreenState extends State<AddServiceScreen> {
       return;
     }
 
+    if (!ServiceItem.isValidIdentifier(id) ||
+        !ServiceItem.isValidIdentifier(binName)) {
+      _showAlert('服务标识和可执行文件名仅允许包含字母、数字、下划线、连字符和点（且不能以点开头或包含 ..）');
+      return;
+    }
+
     setState(() => _installing = true);
     HapticFeedback.mediumImpact();
 
-    final argsList = _argsCtrl.text
-        .trim()
-        .split(RegExp(r'\s+'))
-        .where((s) => s.isNotEmpty)
-        .toList();
+    final argsList = ServiceItem.parseArgs(_argsCtrl.text);
     final envMap = ServiceItem.parseDotEnv(_envCtrl.text);
 
     final item = ServiceItem(

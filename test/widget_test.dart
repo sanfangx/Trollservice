@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:troll_service/main.dart';
@@ -30,7 +31,10 @@ void main() {
 
     test('1. 默认安装根路径严格为 /var/mobile/Documents/service', () {
       final defaultBridge = MethodChannelServiceBridge();
-      expect(defaultBridge.serviceRootPath, equals('/var/mobile/Documents/service'));
+      expect(
+        defaultBridge.serviceRootPath,
+        equals('/var/mobile/Documents/service'),
+      );
 
       final item = ServiceItem(
         id: 'aistudio2api',
@@ -56,14 +60,20 @@ void main() {
       final xml = ServiceItem.generateServiceEntitlementsXml('aistudio2api');
       expect(xml, contains('<key>platform-application</key>'));
       expect(xml, contains('<key>com.apple.private.security.no-sandbox</key>'));
-      expect(xml, contains('<key>com.apple.multitasking.unlimitedassertions</key>'));
+      expect(
+        xml,
+        contains('<key>com.apple.multitasking.unlimitedassertions</key>'),
+      );
       expect(xml, contains('<key>com.apple.private.kernel.jetsam</key>'));
       expect(xml, contains('<key>com.apple.private.memorystatus</key>'));
 
       // 绝不能包含会导致崩溃或强制要求开发者模式的 Banned Keys
       expect(xml, isNot(contains('com.apple.private.cs.debugger')));
       expect(xml, isNot(contains('dynamic-codesigning')));
-      expect(xml, isNot(contains('com.apple.private.skip-library-validation')));
+      expect(
+        xml,
+        isNot(contains('com.apple.private.skip-library-validation')),
+      );
       expect(xml, isNot(contains('get-task-allow')));
       expect(xml, isNot(contains('task_for_pid-allow')));
     });
@@ -97,7 +107,8 @@ void main() {
         isTrue,
       );
       expect(
-        mockBridge.executedSignCommands.any((c) => c.startsWith('fastPathSign ')),
+        mockBridge.executedSignCommands
+            .any((c) => c.startsWith('fastPathSign ')),
         isTrue,
       );
 
@@ -110,7 +121,9 @@ void main() {
       final svcDir = item.serviceDir(controller.serviceRootPath);
       final accountFile = File('$svcDir/accounts/storage-state.json')
         ..createSync(recursive: true)
-        ..writeAsStringSync('{"cookies":[{"name":"SID","value":"SECRET_TOKEN"}]}');
+        ..writeAsStringSync(
+          '{"cookies":[{"name":"SID","value":"SECRET_TOKEN"}]}',
+        );
       final dbFile = File('$svcDir/runtime/requests.db')
         ..createSync(recursive: true)
         ..writeAsStringSync('SQLITE_REQUEST_LEDGER_DATA_12345');
@@ -129,13 +142,17 @@ void main() {
 
       // 5) 验证二进制已更新为 v2 且重新执行了 ldid -S 与 fastPathSign
       final installedBin = File(item.binaryPath(controller.serviceRootPath));
-      expect(installedBin.readAsStringSync(), equals('MACH_O_ARM64_BINARY_V2_UPGRADED'));
+      expect(
+        installedBin.readAsStringSync(),
+        equals('MACH_O_ARM64_BINARY_V2_UPGRADED'),
+      );
       expect(
         mockBridge.executedSignCommands.any((c) => c.startsWith('ldid -S')),
         isTrue,
       );
       expect(
-        mockBridge.executedSignCommands.any((c) => c.startsWith('fastPathSign ')),
+        mockBridge.executedSignCommands
+            .any((c) => c.startsWith('fastPathSign ')),
         isTrue,
       );
 
@@ -146,7 +163,10 @@ void main() {
         equals('{"cookies":[{"name":"SID","value":"SECRET_TOKEN"}]}'),
       );
       expect(dbFile.existsSync(), isTrue);
-      expect(dbFile.readAsStringSync(), equals('SQLITE_REQUEST_LEDGER_DATA_12345'));
+      expect(
+        dbFile.readAsStringSync(),
+        equals('SQLITE_REQUEST_LEDGER_DATA_12345'),
+      );
 
       final envFile = File(item.envFilePath(controller.serviceRootPath));
       expect(envFile.existsSync(), isTrue);
@@ -301,7 +321,8 @@ void main() {
       expect(controller.serviceRootPath, equals(customRoot));
       expect(Directory(customRoot).existsSync(), isTrue);
 
-      final bin = File('${tempRoot.path}/my_bin')..writeAsStringSync('MACH_O_CUSTOM');
+      final bin = File('${tempRoot.path}/my_bin')
+        ..writeAsStringSync('MACH_O_CUSTOM');
       final item = ServiceItem(
         id: 'custom_path_svc',
         name: 'CustomPathSvc',
@@ -318,7 +339,10 @@ void main() {
         item.binaryPath(controller.serviceRootPath),
         equals('$customRoot/custom_path_svc/bin/my_bin'),
       );
-      expect(File(item.binaryPath(controller.serviceRootPath)).existsSync(), isTrue);
+      expect(
+        File(item.binaryPath(controller.serviceRootPath)).existsSync(),
+        isTrue,
+      );
     });
 
     test('9. 全局一键停止所有服务与清空所有日志', () async {
@@ -350,6 +374,87 @@ void main() {
       // 一键停止全部服务
       await controller.stopAllServices();
       expect(controller.services.first.status.isRunning, isFalse);
+    });
+
+    test('10. 安全校验：拦截路径穿越 (../) 与非法服务标识', () async {
+      expect(ServiceItem.isValidIdentifier('aistudio2api'), isTrue);
+      expect(ServiceItem.isValidIdentifier('sing-box_v1.2'), isTrue);
+      expect(ServiceItem.isValidIdentifier('../etc'), isFalse);
+      expect(ServiceItem.isValidIdentifier('..'), isFalse);
+      expect(ServiceItem.isValidIdentifier('.hidden'), isFalse);
+      expect(ServiceItem.isValidIdentifier('bad/slash'), isFalse);
+      expect(ServiceItem.isValidIdentifier('bad<xml>'), isFalse);
+
+      final bin = File('${tempRoot.path}/sec_bin')..writeAsStringSync('BIN');
+      final badItem = ServiceItem(
+        id: '../escape',
+        name: 'BadSvc',
+        binaryName: 'sec_bin',
+        port: 8080,
+      );
+      final installed = await controller.installService(
+        item: badItem,
+        srcBinaryPath: bin.path,
+      );
+      expect(installed, isFalse);
+      expect(controller.lastError, contains('非法字符'));
+
+      // 拒绝包含 .. 的自定义根路径且不污染原路径
+      final prevRoot = controller.serviceRootPath;
+      final rootOk =
+          await controller.setCustomServiceRootPath('/var/mobile/../etc');
+      expect(rootOk, isFalse);
+      expect(controller.serviceRootPath, equals(prevRoot));
+    });
+
+    test('11. 命令行参数解析器支持单双引号、带空格路径及转义字符', () {
+      const raw =
+          r'''run -c "/var/mobile/My Config/config.json" --tag 'hello world' --flag=1''';
+      final parsed = ServiceItem.parseArgs(raw);
+      expect(
+        parsed,
+        equals([
+          'run',
+          '-c',
+          '/var/mobile/My Config/config.json',
+          '--tag',
+          'hello world',
+          '--flag=1',
+        ]),
+      );
+
+      final formatted = ServiceItem.formatArgs(parsed);
+      expect(
+        ServiceItem.parseArgs(formatted),
+        equals(parsed),
+      );
+    });
+
+    test('12. 尾部流式日志读取支持超大文件截断与非 UTF-8 脏字节容错', () async {
+      final bin = File('${tempRoot.path}/log_bin')..writeAsStringSync('BIN');
+      final item = ServiceItem(
+        id: 'log_test_svc',
+        name: 'LogTestSvc',
+        binaryName: 'log_bin',
+        port: 5000,
+      );
+      await controller.installService(item: item, srcBinaryPath: bin.path);
+
+      final logFile = File(item.stdoutLogPath(controller.serviceRootPath));
+      logFile.parent.createSync(recursive: true);
+
+      // 写入大于 64KB 的日志 + 非法 UTF-8 字节 (0xFF, 0xFE) + 尾部标记行
+      final builder = BytesBuilder();
+      for (var i = 0; i < 2000; i++) {
+        builder.add('Line $i: padding log payload data 1234567890\n'.codeUnits);
+      }
+      builder.add([0xFF, 0xFE, 0x80]);
+      builder.add('\nFINAL_TAIL_LINE_SUCCESS\n'.codeUnits);
+      logFile.writeAsBytesSync(builder.takeBytes());
+
+      final logs = await controller.readLogs(item.id, maxLines: 50);
+      expect(logs, contains('FINAL_TAIL_LINE_SUCCESS'));
+      expect(logs.split('\n').length, lessThanOrEqualTo(50));
     });
   });
 }

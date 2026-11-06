@@ -55,10 +55,12 @@ private let kPersonaFlagsOverride: UInt32 = 1
     switch call.method {
     case "initWorkspace":
       let customRoot = (call.arguments as? [String: Any])?["root"] as? String ?? self.currentServiceRoot
-      self.currentServiceRoot = customRoot
-      setenv("TROLLSERVICE_ROOT", customRoot, 1)
       DispatchQueue.global(qos: .userInitiated).async {
         let output = self.invokeRootHelper(args: ["init-workspace", customRoot])
+        if (output["ok"] as? Bool) == true {
+          self.currentServiceRoot = customRoot
+          setenv("TROLLSERVICE_ROOT", customRoot, 1)
+        }
         DispatchQueue.main.async {
           result(output)
         }
@@ -72,11 +74,13 @@ private let kPersonaFlagsOverride: UInt32 = 1
         }
         return
       }
-      self.currentServiceRoot = newRoot
-      UserDefaults.standard.set(newRoot, forKey: "TrollServiceCustomRoot")
-      setenv("TROLLSERVICE_ROOT", newRoot, 1)
       DispatchQueue.global(qos: .userInitiated).async {
         let output = self.invokeRootHelper(args: ["set-root", newRoot])
+        if (output["ok"] as? Bool) == true {
+          self.currentServiceRoot = newRoot
+          UserDefaults.standard.set(newRoot, forKey: "TrollServiceCustomRoot")
+          setenv("TROLLSERVICE_ROOT", newRoot, 1)
+        }
         DispatchQueue.main.async {
           result(output)
         }
@@ -99,6 +103,7 @@ private let kPersonaFlagsOverride: UInt32 = 1
       }
       DispatchQueue.global(qos: .userInitiated).async {
         let output = self.invokeRootHelper(args: helperArgs)
+        self.cleanupPickedTempFileIfNeeded(srcPath)
         DispatchQueue.main.async {
           result(output)
         }
@@ -121,6 +126,7 @@ private let kPersonaFlagsOverride: UInt32 = 1
       }
       DispatchQueue.global(qos: .userInitiated).async {
         let output = self.invokeRootHelper(args: helperArgs)
+        self.cleanupPickedTempFileIfNeeded(srcPath)
         DispatchQueue.main.async {
           result(output)
         }
@@ -399,6 +405,13 @@ private let kPersonaFlagsOverride: UInt32 = 1
       }
     }
     return nil
+  }
+
+  private func cleanupPickedTempFileIfNeeded(_ filePath: String) {
+    let tmpDir = NSTemporaryDirectory()
+    if filePath.hasPrefix(tmpDir) || filePath.contains("-Inbox/") {
+      try? FileManager.default.removeItem(atPath: filePath)
+    }
   }
 
   func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
